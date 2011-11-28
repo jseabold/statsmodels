@@ -17,7 +17,11 @@ from scikits.statsmodels.sandbox.nonparametric import kernels
 from scikits.statsmodels.tools.decorators import (cache_readonly,
                                                     resettable_cache)
 import bandwidths
-from kdetools import (forrt, revrt, silverman_transform, linbin, counts)
+from kdetools import (forrt, revrt, silverman_transform, counts)
+try:
+    from fast_linbin import linbin
+except ImportError:
+    from kdetools import libin
 
 #### Kernels Switch for estimators ####
 
@@ -225,7 +229,7 @@ class KDE(object):
 
 #### Kernel Density Estimator Functions ####
 
-def kdensity(X, kernel="gauss", bw="scott", weights=None, gridsize=None,
+def kdensity(X, kernel="gau", bw="scott", weights=None, gridsize=None,
              adjust=1, clip=(-np.inf,np.inf), cut=3, retgrid=True):
     """
     Rosenblatz-Parzen univariate kernel desnity estimator
@@ -239,7 +243,7 @@ def kdensity(X, kernel="gauss", bw="scott", weights=None, gridsize=None,
         - "biw" for biweight
         - "cos" for cosine
         - "epa" for Epanechnikov
-        - "gauss" for Gaussian.
+        - "gau" for Gaussian.
         - "tri" for triangular
         - "triw" for triweight
         - "uni" for uniform
@@ -416,10 +420,10 @@ def kdensityfft(X, kernel="gau", bw="scott", weights=None, gridsize=None,
     # 1 Make grid and discretize the data
     if gridsize == None:
         gridsize = np.max((nobs,512.))
-    gridsize = 2**np.ceil(np.log2(gridsize)) # round to next power of 2
+    gridsize = int(2**np.ceil(np.log2(gridsize))) # round to next power of 2
 
-    a = np.min(X)-cut*bw
-    b = np.max(X)+cut*bw
+    a = np.min(X) - cut*bw
+    b = np.max(X) + cut*bw
     grid,delta = np.linspace(a,b,gridsize,retstep=True)
     RANGE = b-a
 
@@ -457,12 +461,118 @@ def kdensityfft(X, kernel="gau", bw="scott", weights=None, gridsize=None,
     else:
         return f, bw
 
+class LeaveOneOut(object):
+    """
+    Generator to give leave one out views on X
+
+    Parameters
+    ----------
+    X : array-like
+        1d array
+
+    Examples
+    --------
+    >>> X = np.arange(10)
+    >>> loo = LeaveOneOut(X)
+    >>> for x in loo:
+    ...    print x
+
+    Notes
+    -----
+    A little lighter weight than sklearn LOO. We don't need test index.
+    Also passes views on X, not the index.
+    """
+    def __init__(self, X):
+        self.X = np.asarray(X)
+
+    def __iter__(self):
+        X = self.X
+        n = len(X)
+        for i in xrange(n):
+            index = np.ones(n, dtype=np.bool)
+            index[i] = False
+            yield X[index]
+
+def kde_loglike(x, gridsize, nobs, bw, cut):
+    """
+    Returns the loglike of one loop for parallelization
+    """
+    a = np.min(x)-cut*bw
+    b = np.max(x)+cut*bw
+    grid, delta = np.linspace(a,b,gridsize,retstep=True)
+    RANGE = b-a
+    binned = linbin(x,a,b,gridsize)/(delta*nobs)
+    y = forrt(binned)
+    zstar = silverman_transform(bw, gridsize, RANGE)*y
+    f = revrt(zstar)
+    return -np.sum(np.log(f))
+
+
+from sklearn.externals.joblib import Parallel, delayed
+def kde_loglike_cv(bw, X, cut, gridsize):
+    """
+    Likelihood for Leave One Out cross-validation
+    """
+    bw = np.exp(bw) + .01 # don't let it go below .01, arbitrary...
+    loglike = 0
+    loo = LeaveOneOut(X)
+    nobs = len(X) - 1
+    #loglike = np.sum(Parallel(n_jobs=4)(delayed(kde_loglike)(x, gridsize, nobs,
+    #    bw, cut) for x in loo))
+    for x in loo: #TODO: split this over processors
+        #NOTE: this is only slightly more streamlined than kdensityfft
+        #TODO: make it so bw selection can be brought in and that code reused
+        a = np.min(x)-cut*bw
+        b = np.max(x)+cut*bw
+        grid, delta = np.linspace(a,b,gridsize,retstep=True)
+        RANGE = b-a
+        binned = linbin(x,a,b,gridsize)/(delta*nobs)
+        y = forrt(binned)
+        zstar = silverman_transform(bw, gridsize, RANGE)*y
+        f = revrt(zstar)
+        loglike += -np.sum(np.log(f))
+    return loglike
+
+#NOTE: Maximum Lilihood CV(h) is, up to a constant, an unbiased estimator
+# of the expected
+#KLIC distance error for an estimate on a sample size n-1. This does not
+#go through if f has unbounded support and the kernel function has
+# bounded support, CV(h) is very sensitive to outliers, which can lead to
+#oversmoothing. Shcuster and Gregory (1981) CV is inconsistent unless
+#the true density is normal or of bounded support. CV and LS-CV can
+#both be problematic on discretized data. Cf, Silverman Chapter 3 for more.
+def kdensity_crossval(X, kernel="gau", bw="scott", weights=None, gridsize=None,
+                adjust=1, clip=(-np.inf,np.inf), cut=3, retgrid=True):
+    from scipy import optimize
+    X = np.asarray(X)
+    X = X[np.logical_and(X>clip[0], X<clip[1])] # won't work for two columns.
+                                                # will affect underlying data?
+    try:
+        bw = float(bw)
+    except:
+        bw = bandwidths.select_bandwidth(X, bw, kernel) # will cross-val fit this pattern?
+    bw *= adjust
+
+    nobs = float(len(X)-1) # after trim, minus 1 for leave one out
+
+    # 1 Make grid and discretize the data
+    if gridsize == None:
+        gridsize = np.max((nobs,512.))
+    gridsize = 2**np.ceil(np.log2(gridsize)) # round to next power of 2
+    gridsize = int(gridsize)
+
+    bw = optimize.fmin(kde_loglike_cv, bw, args=(X,cut,gridsize))
+    bw = np.exp(bw) + .01
+
+    return kdensityfft(X, "gau", bw, weights, gridsize, adjust, clip, cut,
+            retgrid)
+
 if __name__ == "__main__":
     import numpy as np
     np.random.seed(12345)
     xi = np.random.randn(100)
-    f,grid, bw1 = kdensity(xi, kernel="gauss", bw=.372735, retgrid=True)
-    f2, bw2 = kdensityfft(xi, kernel="gauss", bw="silverman",retgrid=False)
+    #f,grid, bw1 = kdensity(xi, kernel="gau", bw=.372735, retgrid=True)
+    f2, bw2 = kdensityfft(xi, kernel="gau", bw="silverman",retgrid=False)
 
 # do some checking vs. silverman algo.
 # you need denes.f, http://lib.stat.cmu.edu/apstat/176
@@ -502,3 +612,17 @@ if __name__ == "__main__":
 #        ft = np.loadtxt('./ft_silver.csv')
 #        smooth = np.loadtxt('./smooth_silver.csv')
         print "Didn't get the estimates from the Silverman algorithm"
+
+    from timeit import default_timer as time
+    #import cProfile
+    #cProfile.run('f3, grid, bw3 = kdensity_crossval(xi, retgrid=True)',
+    #             'kde.profile2')
+    #import pstats
+    #p = pstats.Stats('kde.profile2')
+    #p.strip_dirs().sort_stats(-1).print_stats()
+
+    tic = time()
+    f3, grid, bw3 = kdensity_crossval(xi, retgrid=True)
+    toc = time()
+    print str(round(toc-tic,2)), " seconds"
+
