@@ -1,23 +1,23 @@
 #### Convenience Functions to be moved to kerneltools ####
 import numpy as np
 
-def forrt(X,m=None):
+def forrt(X,m=None,axis=0):
     """
     RFFT with order like Munro (1976) FORTT routine.
     """
     if m is None:
         m = len(X)
-    y = np.fft.rfft(X,m)/m
+    y = np.fft.rfft(X,m,axis=axis)/m
     return np.r_[y.real,y[1:-1].imag]
 
-def revrt(X,m=None):
+def revrt(X,m=None,axis=0):
     """
     Inverse of forrt. Equivalent to Munro (1976) REVRT routine.
     """
     if m is None:
         m = len(X)
     y = X[:m/2+1] + np.r_[0,X[m/2+1:],0]*1j
-    return np.fft.irfft(y)*m
+    return np.fft.irfft(y,axis=axis)*m
 
 def silverman_transform(bw, M, RANGE):
     """
