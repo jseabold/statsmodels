@@ -37,6 +37,7 @@ Variable name definitions::
 
 from numpy import recfromtxt, column_stack, array
 from statsmodels.datasets import utils as du
+from statsmodels.sandbox.survival2 import Survival
 from os.path import dirname, abspath
 
 def load():
@@ -49,7 +50,10 @@ def load():
         See DATASET_PROPOSAL.txt for more information.
     """
     data = _get_data()
-    return du.process_recarray(data, endog_idx=0, dtype=float)
+    endog = Survival(data['duration'])
+    data = du.process_recarray(data, endog_idx=0, dtype=float)
+    data.endog = endog
+    return data
 
 def load_pandas():
     """
@@ -61,7 +65,10 @@ def load_pandas():
         See DATASET_PROPOSAL.txt for more information.
     """
     data = _get_data()
-    return du.process_recarray_pandas(data, endog_idx=0, dtype=float)
+    endog = Survival(data['duration'])
+    data = du.process_recarray_pandas(data, endog_idx=0, dtype=float)
+    data.endog = endog
+    return data
 
 def _get_data():
     filepath = dirname(abspath(__file__))
