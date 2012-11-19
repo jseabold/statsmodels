@@ -1,4 +1,4 @@
-__all__ = ['COPYRIGHT','TITLE','SOURCE','DESCRSHORT','DESCRLONG','NOTE', 'load']
+#! /usr/bin/env python
 
 """Survival data for ovarian cancer"""
 
@@ -20,9 +20,8 @@ Culhane A, Pillay K, et al. (2011) [1] and downloaded from [2]
 
 DESCRSHORT  = """Survival data for ovarian cancer"""
 
-DESCRLONG   = """Survival data for ovarian cancer with
-                gene expression covariates, compiled from
-                four seperate studies"""
+DESCRLONG   = """Survival data for ovarian cancer with gene expression
+covariates, compiled from four seperate studies."""
 
 NOTE        = """
 Number of Observations: 239
@@ -36,9 +35,11 @@ Variable name definitions:
     their names. For details see [1] above.
 """
 
-from numpy import recfromtxt, column_stack, array, genfromtxt, r_
-from statsmodels.tools import Dataset
+import numpy as np
+from statsmodels.datasets import utils as du
+from statsmodels.sandbox.survival2 import Survival
 from os.path import dirname, abspath
+
 
 def load():
     """
@@ -50,12 +51,24 @@ def load():
         See DATASET_PROPOSAL.txt for more information.
 
     """
+    data = _get_data()
+    new_data = du.process_recarray(data, exog_idx=[2,3,4,5], dtype=float)
+    endog = Survival(time1=data['time'],
+                     censoring=data['censoring'])
+    new_data.endog = endog
+    return new_data
+
+def load_pandas():
+    data = _get_data()
+    new_data = du.process_recarray_pandas(data, exog_idx[2,3,4,5], dtype=float)
+    endog = Survival(time1=data['time'],
+                     censoring=data['censoring'])
+    new_data.endog = endog
+    return new_data
+
+
+def _get_data():
     filepath = dirname(abspath(__file__))
-    data = recfromtxt(open(filepath + '/ovarian_cancer_data.txt', 'rb'),
-            dtype=float)
-    gene_names = genfromtxt(open(filepath + '/ovarian_gene_names.txt', 'rb'),
-            dtype="S11")
-    surv_names = array(['time','censoring']).astype("S11")
-    names = r_[surv_names,gene_names]
-    dataset = Dataset(data=data, names=names)
-    return dataset
+    data = data = np.recfromtxt(open(filepath+"/ovarian_cancer_data.csv",
+                                     "rb"), names=True, dtype=float)
+    return data
