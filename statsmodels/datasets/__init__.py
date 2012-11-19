@@ -5,5 +5,5 @@ Datasets module
 from . import (anes96, cancer, committee, ccard, copper, cpunish, elnino,
                engel, grunfeld, longley, macrodata, modechoice, nile, randhie,
                scotland, spector, stackloss, star98, strikes, sunspots, fair,
-               heart, statecrime)
+               heart, statecrime, ovarian_cancer)
 from utils import get_rdataset, get_data_home, clear_data_home
