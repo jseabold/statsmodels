@@ -28,7 +28,7 @@ Number of Observations: 239
 Number of Variables: 660
 Variable name definitions:
     time      - survival time (in months)
-    censoring - 0 if observation is censored, 1 if observation is
+    event - 0 if observation is censored, 1 if observation is
                 an event
 
     The remaining variables are gene expression values identified by
@@ -54,15 +54,15 @@ def load():
     data = _get_data()
     new_data = du.process_recarray(data, exog_idx=[2,3,4,5], dtype=float)
     endog = Survival(time1=data['time'],
-                     censoring=data['censoring'])
+                     event=data['event'])
     new_data.endog = endog
     return new_data
 
 def load_pandas():
     data = _get_data()
-    new_data = du.process_recarray_pandas(data, exog_idx[2,3,4,5], dtype=float)
+    new_data = du.process_recarray_pandas(data, exog_idx=[2,3,4,5], dtype=float)
     endog = Survival(time1=data['time'],
-                     censoring=data['censoring'])
+                     event=data['event'])
     new_data.endog = endog
     return new_data
 
