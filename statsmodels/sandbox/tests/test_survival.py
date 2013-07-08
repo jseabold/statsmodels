@@ -6,6 +6,7 @@ exceptions
 
 
 import numpy as np
+import pandas
 from statsmodels.sandbox.survival2 import Survival, KaplanMeier, CoxPH
 
 from numpy.testing import assert_equal
@@ -16,6 +17,7 @@ from statsmodels.datasets import ovarian_cancer
 dta = ovarian_cancer.load()
 darray = np.asarray(dta['data'])
 
+from results.km_results import KaplanMeierResults
 
 class CheckCoxPH(object):
 
@@ -109,7 +111,7 @@ class CheckCoxPH(object):
         model.censoring
         model.exog
 
-class TestCoxPH1(CheckCoxPH):
+class XestCoxPH1(CheckCoxPH):
 
     @classmethod
     def setup_class(cls):
@@ -119,7 +121,7 @@ class TestCoxPH1(CheckCoxPH):
         cls.results = model.fit()
         cls.has_strata = False
 
-class TestCoxPHStrata(CheckCoxPH):
+class XestCoxPHStrata(CheckCoxPH):
 
     @classmethod
     def setup_class(cls):
@@ -138,122 +140,110 @@ class TestCoxPHStrata(CheckCoxPH):
 
 class CheckKaplanMeier(object):
 
-    def test_smoke_model(self):
-        #smoke test to check status and for refactoring
-        model = self.model
-        results = self.results
+    def test_survival(self):
+        np.testing.assert_almost_equal(self.res1.survival,
+                                       self.res2.survival, 5)
 
-        #results._plotting_proc()  #arguments ?
-        #results._summary_proc()  #arguments ?
-        results.conf_int()
-        results.cov_params()
-        #results.f_test(np.ones(results.params.shape)) #BUG
-        #results.initialize()
-        #results.load()
-        results.plot()
-        #results.predict()   #TODO: missing in model? inherited
-        #results.remove_data()  #TODO
-        #results.save()
-        results.summary()
-        #results.t()   #BUG  cov_p is 1-dim
-        #results.t_test(np.ones(results.params.shape)) #BUG
-        #results.test_diff() #check availability of groups
+    def test_nrisk(self):
+        np.testing.assert_almost_equal(self.res1.model.nrisk,
+                                       self.res2.nrisk, 5)
 
-        #results._cache
-        #results._data_attr #TODO: for remove data not abailable
-        results.bse
-        results.censoring
-        results.censorings
-        results.event
-        results.exog
-        results.groups
-        results.model
-        results.normalized_cov_params
-        results.params
-        results.pvalues
-        results.results
-        results.scale
-        results.times
-        results.ts
-        results.tvalues
+    def test_nevents(self):
+        np.testing.assert_almost_equal(self.res1.model.event,
+                                       self.res2.event, 5)
 
+    def test_ntime(self):
+        np.testing.assert_almost_equal(self.res1.model.time,
+                                       self.res2.time, 5)
 
-        model.censoring
-        model.censorings
-        model.df_resid
-        model.event
-        model.exog
-        model.groups
-        model.normalized_cov_params
-        model.params
-        model.results
-        model.times
-        model.ts
-        model.ttype
+    def test_std_err_cumhazard(self):
+        np.testing.assert_almost_equal(self.res1.std_err_cumhazard,
+                                       self.res2.std_err_cumhazard, 5)
 
-    def test_isolate_curve(self):
+    def test_std_err(self):
+        #we drop the censored cases in _plot_curve rather than not keeping
+        # them around like summary.survfit in R, so
+        std_err = self.res1.std_err
+        std_err = std_err[self.res1.model.endog[:,1].astype(bool)]
+        np.testing.assert_almost_equal(std_err,
+                                       self.res2.std_err, 5)
+
+    def test_diff(self):
+        pass
+
+    def test_plot(self):
+        pass
+
+    def test_conf_int(self):
+        conf_int = self.res1.conf_int()
+        res_conf_int = np.c_[self.res2.lower, self.res2.upper]
+        np.testing.assert_almost_equal(conf_int,
+                                       res_conf_int, 5)
+
+    def xest_isolate_curve(self):
         #separate to get isolated failure
-        model = self.model
-        results = self.results
-        if self.has_exog and model.groups is not None:
+        model = self.res1.model
+        results = self.res1
+        if model.groups is not None:
             results.isolate_curve(model.groups[0])
-            #requires exog in model
-            #BUG ? typo and needs groups, fixed typo
-            #needs censoring ? line 1587
-            print "isolate success"
+        #TODO: test "exog", ["exog1", "exog2"], ["exog"], None
 
-class TestKaplanMeier1(CheckKaplanMeier):
+class TestKaplanMeierNoCensorNoGroup(CheckKaplanMeier):
+    @classmethod
+    def setup_class(cls):
+        from statsmodels.datasets import strikes
+        dta = strikes.load_pandas()
+        surv = Survival("duration", event=None, data=dta.data)
+        model = KaplanMeier(surv)
+        cls.res1 = model.fit()
+        cls.res2 = KaplanMeierResults(group=False, censor=False)
+
+class TestKaplanMeierNoCensorGroup(CheckKaplanMeier):
     #no exog
 
     @classmethod
     def setup_class(cls):
         from statsmodels.datasets import strikes
-        dta = strikes.load()
-        dta = dta.values()[-1]
+        dta = strikes.load_pandas()
+        bins = np.unique(dta.exog.values)
+        bins.sort()
+        #TODO: what version of pandas was cut added in?
+        groups = pandas.cut(dta.exog.values.squeeze(), bins,
+                            include_lowest=True, labels=False)
 
-        dtas = Survival(0, censoring=None, data=dta)
-        cls.model = model = KaplanMeier(dtas)
-        cls.results = model.fit()
+        surv = Survival("duration", data=dta.data)
+        model = KaplanMeier(surv, groups=groups)
+        cls.res1 = model.fit()
+        cls.res2 = KaplanMeierResults(group=True, censor=False)
 
-        cls.has_exog = False
+class TestKaplanMeierCensorNoGroup(CheckKaplanMeier):
+    @classmethod
+    def setupClass(cls):
+        from statsmodels.datasets import strikes
+        dta = strikes.load_pandas().data
+        dta["event"] = 1
+        dta.ix[dta["duration"] > 80, "event"] = 0
+        surv = Survival("duration", event="event", data=dta)
 
-class TestKaplanMeier2(CheckKaplanMeier):
-    #no exog
+        cls.res1 = KaplanMeier(surv).fit()
+        cls.res2 = KaplanMeierResults(group=False, censor=True)
 
+
+class TestKaplanMeierCensorGroup(CheckKaplanMeier):
     @classmethod
     def setup_class(cls):
         from statsmodels.datasets import strikes
-        dta = strikes.load()
-        dta = dta.values()[-1]
-
-        dtas = Survival(0, censoring=None, data=dta)
-        cls.model = model = KaplanMeier(dtas, exog=dta[:,1])
-        cls.results = model.fit()
-        cls.has_exog = True
-
-
-
-class TestKaplanMeier3(CheckKaplanMeier):
-    #with censoring #and exog
-
-    @classmethod
-    def setup_class(cls):
-
-        from statsmodels.datasets import strikes
-        dta = strikes.load()
-        dta = dta.values()[-1]
-        censoring = np.ones_like(dta[:,0])
-        censoring[dta[:,0] > 80] = 0
-        dta = np.c_[dta, censoring]
-
-        dtas = Survival(0, censoring=2, data=dta)
-        cls.model = model = KaplanMeier(dtas, exog=dta[:,1][:,None]) #,censoring=2)
-        cls.results = model.fit()
-
-        cls.has_exog = True
-
-
-
+        dta = strikes.load_pandas().data
+        dta["event"] = 1
+        dta.ix[dta["duration"] > 80, "event"] = 0
+        surv = Survival("duration", event="event", data=dta)
+        bins = np.unique(dta["iprod"].values)
+        bins.sort()
+        groups = pandas.cut(dta["iprod"], bins, include_lowest=True,
+                            labels=False)
+        model = KaplanMeier(surv, groups=groups)
+        cls.res1 = model.fit()
+        cls.res2 = KaplanMeierResults(group=True, censor=True)
 
 if __name__ == '__main__':
     import nose
