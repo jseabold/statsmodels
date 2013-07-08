@@ -1,5 +1,5 @@
 #Survival Analysis
-
+from itertools import starmap
 import numpy as np
 import numpy.linalg as la
 try:
@@ -9,12 +9,56 @@ except ImportError:
 
 from scipy import stats
 
+from statsmodels.tools import data
 from statsmodels.iolib.table import SimpleTable
-from statsmodels.base.model import LikelihoodModel, LikelihoodModelResults
+from statsmodels.base.model import (Model, LikelihoodModel,
+                                    LikelihoodModelResults)
+from statsmodels.base.data import handle_data
+from statsmodels.graphics import utils as graphics_utils
+from statsmodels.tools.decorators import cache_readonly
+from patsy import dmatrix
+from pandas import Series, DataFrame, Index, isnull
+try:
+    from scipy.maxentropy import logsumexp as sp_logsumexp
+except:
+    from scipy.misc import logsumexp as sp_logsumexp
+
+#TODO: turn this into a helper utility function - also used in graphics
+def _maybe_name_or_idx_data(name, X):
+    if name is None:
+        return
+    elif isinstance(name, basestring):
+        return Series(dmatrix(name + "-1", X).squeeze(), name=name)
+    elif isinstance(name, int):
+        if data._is_using_ndarray(X, None):
+            return X[:, name]
+        elif data._is_using_pandas(X, None):
+            return X[X.columns[name]]
+        else:
+            raise ValueError("Data of type %s not understood" % type(X))
+
+def _maybe_asarray_pandas_passthru(X):
+    if X is None:
+        return
+    elif data._is_using_pandas(X, None):
+        if (X.ndim == 2 and X.shape[1] > 1):
+            raise ValueError("DataFrame must contain one variable")
+        else:
+            return X
+    else:
+        return np.asarray(X)
+
+def _maybe_event_to_censored(X):
+    if X is None:
+        return
+    elif data._is_using_ndarray_type(X, None):
+        return (1 - X)
+    elif data._is_using_pandas(X, None):
+        return Series((1 - X), name="censored")
 
 
-##Need to update all docstrings
-##Use assume unique for np.in1d?
+### Generic base class
+
 
 class Survival(object):
     """
@@ -29,69 +73,156 @@ class Survival(object):
         uncensored (e.g. observed survival time), if
         time2 is not None, then time1 is the index of
         a column containing start times for the
-        observation of each subject(e.g. oberved survival
+        observation of each subject(e.g. observed survival
         time is end time minus start time)
     time2 : None, int or array-like
         index of column containing end times for each observation
-    censoring : int or array-like
-        index of the column containing an indicator
-        of whether an observation is an event, or a censored
-        observation, with 0 for censored, and 1 for an event
-    data : array-like
-        An array, with observations in each row, and
-        variables in the columns
+    event : int or array-like
+        index of the column containing an indicator of whether an observation
+        is an event, or a censored observation, with 0 for censored, and 1
+        for an event.
+    data : array-like, optional
+        An array, with observations in each row, and variables in the columns
 
     Attributes
     -----------
     times : array
         vector of survival times
-    censoring : array
-        vector of censoring indicators
-    ttype : str
+    censored : array
+        vector of censoring indicators. This is the opposite of the event.
+    time_type : str
         indicator of what type of censoring occurs
 
     Examples
     ---------
     see other survival analysis functions for examples
     of usage with those functions
-
     """
-
-    ##Distinguish type of censoring (will fix cox with td covars?)
-    ##Add handling for non-integer times
-    ##Allow vector inputs
-
-    def __init__(self, time1, time2=None, censoring=None, data=None):
+    def __init__(self, time1, time2=None, event=None, ctype=None, data=None):
         if data is not None:
-            data = np.asarray(data)
-            if censoring is None:
-                self.censoring = None
-            else:
-                self.censoring = (data[:,censoring]).astype(float) #(int)
-            if time2 is None:
-                self.type = "exact"
-                self.times = (data[:,time1]).astype(float).astype(int) #string in example
-            else:
-                self.type = "interval"
-                self.start = data[:,time1].astype(int)
-                self.end = data[:,time2].astype(int)
-
-        else:
-            time1 = (np.asarray(time1)).astype(int)
+            event = _maybe_name_or_idx_data(event, data)
+            censored = _maybe_event_to_censored(event)
             if time2 is not None:
-                self.type = "interval"
+                self.start = _maybe_name_or_idx_data(time1, data)
+                self.end = _maybe_name_or_idx_data(time2, data)
+                time = self.start - self.end
+                self.time_type = "interval"
+            else:
+                time = _maybe_name_or_idx_data(time1, data)
+                self.time_type = "exact"
+        else:
+            event = _maybe_asarray_pandas_passthru(event)
+            censored = _maybe_event_to_censored(event)
+            time1 = _maybe_asarray_pandas_passthru(time1)
+            if time2 is not None:
                 self.start = time1
-                self.end = (np.asarray(time2)).astype(int)
+                self.end = _maybe_asarray_pandas_passthru(time2)
+                time = (self.start - self.end)
+                self.time_type = "interval"
             else:
-                self.type = "exact"
-                self.times = time1
-            if censoring is None:
-                self.censoring = None
-            else:
-                self.censoring = (np.asarray(censoring)).astype(int)
+                self.time_type = "exact"
+                time = time1
+        names = ["time", "event", "censored"] # for correct expected order
+        if event is None:
+            event = [1] * len(time)
+            censored = [0] * len(time)
+        self.data = DataFrame.from_dict(dict(time=time,
+                                             event=event,
+                                             censored=censored))[names]
+    def __len__(self):
+        return len(self.data)
 
+    @property
+    def time(self):
+        return self.data["time"]
 
-class KaplanMeier(object):
+    @property
+    def event(self):
+        return self.data["event"]
+
+    @property
+    def censored(self):
+        return self.data["censored"]
+
+    def mean(self):
+        # hard-coded to act on axis 0
+        return np.average(self.time, weights=self.event)
+
+class SurvivalModel(Model):
+    def __init__(self, surv, exog=None, groups=None, missing='none',
+                       **kwargs):
+        self.surv = surv
+
+        # handle missing data in long form
+        orig_data = handle_data(surv.data, exog, groups=groups,
+                                missing=missing, **kwargs)
+
+        # side effects attaches (collapsed) data, super call to Model, etc.
+        self._init_survival_data(orig_data, **kwargs)
+
+    def _init_survival_data(self, data, **kwargs):
+        # attach after dropping missing data before collapsing
+        self.surv = Survival(data.endog[:,0],
+                             event=data.endog[:,1])
+        ynames = data.ynames
+        group_names = data.group_names
+        all_data = data.data_with_groups
+        #TODO: you don't need all this outside of Kaplan Meier
+        if data.groups is not None:
+            group_nobs = all_data.groupby(group_names).size()
+            # group by time and groups
+            grps = all_data.groupby([ynames[0]] + group_names)
+            #NOTE: what is this going to do when there are multiple group
+            # variables?
+            collapsed = grps.sum()[ynames[1:]].sortlevel(level=1)
+            # cumulative events and censored by each group over time
+            cumsum_shift = lambda x : x.cumsum().shift()
+            nrisk = -collapsed.groupby(level=1).apply(cumsum_shift).fillna(0)
+            # shift the observations up a period to get number at risk
+            #TODO: might have to change this assumption for left- vs. right-
+            #continuous intervals
+            nrisk = nrisk.sum(1)
+            collapsed["nrisk"] = group_nobs.add(nrisk, level=1)
+        else:
+            group_nobs = len(all_data)
+            collapsed = all_data.groupby(ynames[0]).sum()
+            cumsum_shift = lambda x : x.cumsum().shift()
+            nrisk = collapsed.apply(cumsum_shift).fillna(0).sum(1)
+            collapsed["nrisk"] = group_nobs - nrisk
+
+        collapsed = collapsed.reset_index(inplace=True)
+        self.collapsed_data = collapsed[ynames].values
+        #self.nrisk = collapsecensoredd["nrisk"]
+        if group_names:
+            self.group_names = group_names
+            self.collapsed_groups = collapsed[group_names]
+        else:
+            self.group_names = None
+            self.collapsed_groups = None
+
+        #NOTE: event and censored need an asarray - can attach original
+        #to SurvivalData
+        # need to repass the data, because Grouping magics are at the
+        # ModelData level, missing has already been handled
+        #TODO: I thought types were handled elsewhere
+        if exog is not None:
+            exog = orig_data.exog.astype(float)
+
+        super(SurvivalModel, self).__init__(data.endog.astype(float),
+                                            exog,
+                                            groups=data.groups,
+                                            missing='none', **kwargs)
+
+        self.time = self.endog[:,0]
+        self.event = self.endog[:,1]
+        self.censored = self.endog[:,2]
+        self.group_names = self.data.group_names
+
+#TODO: make sure data is converted to floats, we don't use bincount anymore
+
+# it may be the case that nrisk, events, etc. just needs an index of
+# time and group
+class KaplanMeier(SurvivalModel):
     """
     Create an object of class KaplanMeier for estimating
     Kaplan-Meier survival curves.
@@ -112,7 +243,7 @@ class KaplanMeier(object):
         (in this case, data should be none)
     exog : int or array-like
         index of the column containing the exogenous
-        variable (must be catagorical). If exog = None, this
+        variable (must be categorical). If exog = None, this
         is equivalent to a single survival curve. Alternatively,
         this can be a vector of exogenous variables index in the same
         manner as data provided either from data or surv
@@ -249,220 +380,97 @@ class KaplanMeier(object):
 
     ##update usage with Survival for changes to Survival
 
-    def __init__(self, surv, exog=None, data=None):
-        censoring = self.censoring = surv.censoring
-        #Todo: is the censoring handling now completely in Survival
-        ttype  = surv.type
-        self.ttype = ttype
-        if ttype == 'exact':
-            times = surv.times
-        if ttype == 'interval':
-            times = surv.end - surv.start
-        if exog is not None:
-            if data is not None:
-                data = np.asarray(data)
-                if data.ndim != 2:
-                    raise ValueError("Data array must be 2d")
-                exog = data[:,exog]
-            else:
-                exog = np.asarray(exog)
-        if exog is None:
-            self.exog = None
-            if censoring != None:
-                data = np.c_[times,censoring]
-                data = data[~np.isnan(data).any(1)]
-                self.times = (data[:,0]).astype(int)
-                self.censoring = (data[:,1]).astype(int)
-                del(data)
-            else:
-                self.times = times[~np.isnan(times)]
-                self.censoring = None
-        elif exog.dtype == float or exog.dtype == int:
-            if censoring != None:
-                data = np.c_[times,censoring,exog]
-                data = data[~np.isnan(data).any(1)]
-                self.times = (data[:,0]).astype(int)
-                self.censoring = (data[:,1]).astype(int)
-                self.exog = data[:,2:]
-            else:
-                data = np.c_[times,exog]
-                #data = np.column_stack([times,exog])
-                data = data[~np.isnan(data).any(1)]
-                self.times = (data[:,0]).astype(int)
-                self.exog = data[:,1:]
-            del(data)
-        else:
-            exog = exog[~np.isnan(times)]
-            if censoring is not None:
-                censoring = censoring[~np.isnan(times)]
-            times = times[~np.isnan(times)]
-            if censoring is not None:
-                times = (times[~np.isnan(censoring)]).astype(int)
-                exog = exog[~np.isnan(censoring)]
-                censoring = (censoring[~np.isnan(censoring)]).astype(int)
-            if exog.ndim == 2:
-                self.times = (times[~np.isnan(exog).any(1)]).astype(int)
-                self.censoring = (censoring[~np.isnan(exog).any(1)]).astype(int)
-                self.exog = (exog[~np.isnan(exog).any(1)]).astype(float)
-            else:
-                self.times = (times[~np.isnan(exog)]).astype(int)
-                self.censoring = (censoring[~np.isnan(exog)]).astype(int)
-                self.exog = (exog[~np.isnan(exog)]).astype(float)
-        if exog is not None:
-            if self.exog.ndim == 2 and len(self.exog[0]) == 1:
-                self.exog = self.exog[:,0]
-            self.df_resid = len(exog) - 1
-        else:
-            self.df_resid = 1
+    def __init__(self, surv, groups=None, missing='none'):
+        self.time_type = surv.time_type
+        # this has side effects, attaches collapsed data and nrisk
+        super(KaplanMeier, self).__init__(surv, None, groups=groups,
+                                          missing=missing, hasconst=False)
 
-    def fit(self, CI_transform="log-log", force_CI_0_1=True):
+    def _init_survival_data(self, data, **kwargs):
+        ynames = data.ynames
+        group_names = data.group_names
+        all_data = data.data_with_groups
+
+        # calculate nrisk by group and collapse the data because exog is None
+        if data.groups is not None:
+            group_nobs = all_data.groupby(group_names).size()
+            # group by time and groups
+            grps = all_data.groupby([ynames[0]] + group_names)
+            #NOTE: what is this going to do when there are multiple group
+            # variables?
+            collapsed = grps.sum()[ynames[1:]].sortlevel(level=1)
+            # cumulative events and censored by each group over time
+            cumsum_shift = lambda x : x.cumsum().shift()
+            nrisk = -collapsed.groupby(level=1).apply(cumsum_shift).fillna(0)
+            # shift the observations up a period to get number at risk
+            #TODO: might have to change this assumption for left- vs. right-
+            #continuous intervals
+            nrisk = nrisk.sum(1)
+            collapsed["nrisk"] = group_nobs.add(nrisk, level=1)
+        else:
+            group_nobs = len(all_data)
+            collapsed = all_data.groupby(ynames[0]).sum()
+            cumsum_shift = lambda x : x.cumsum().shift()
+            nrisk = collapsed.apply(cumsum_shift).fillna(0).sum(1)
+            collapsed["nrisk"] = group_nobs - nrisk
+
+        collapsed = collapsed.reset_index(inplace=True)
+        self.collapsed_data = collapsed[ynames]
+        self.nrisk = collapsed["nrisk"]
+        self.event = collapsed["event"]
+        self.time = collapsed["time"]
+        if group_names:
+            self.groups = collapsed[group_names]
+            self.group_names = group_names
+        else:
+            self.group_names = None
+            self.groups = None
+
+        # initialize the data again because grouping magic is at data level
+        super(SurvivalModel, self).__init__(collapsed[ynames + ["nrisk"]],
+                                            None,
+                                            groups=self.groups,
+                                            missing='none', **kwargs)
+
+    #def from_formula(self, formula, data, subset):
+    #    pass
+
+    def fit(self):
         """
         Calculate the Kaplan-Meier estimator of the survival function
-
-        Parameters
-        ----------
-        CI_transform : string, "log" or "log-log"
-            The type of transformation used to keep the
-            confidence interval in the interval [0,1].
-            "log" applies the natural logarithm,
-            "log-log" applies log(-log(x))
-        force_CI_0_1 : bool
-            indicator of whether confidence interval values
-            that fall outside of [0,1] should be forced to
-            one of the endpoints
 
         Returns
         -------
         KMResults instance for the estimated survival curve(s)
-
         """
-
-        exog = self.exog
-        censoring = self.censoring
-        times = self.times
-        self.results = []
-        self.ts = []
-        self.censorings = []
-        self.event = []
-        self.params = np.array([])
-        self.normalized_cov_params = np.array([])
-        if exog is None:
-            self.groups = None
-            self._fitting_proc(times, censoring, CI_transform,
-                              force_CI_0_1)
+        event = self.event
+        nrisk = self.nrisk
+        hazard = event/nrisk
+        if self.groups is not None:
+            #TODO: make sure this stuff is arrays internally already
+            #TODO: I should just be able to call group(array) and have the
+            # grouped results. This should be part of the Model API
+            data_dict = dict(survival = 1 - np.asarray(hazard),
+                             nrisk=self.nrisk, event=self.event)
+            data_dict.update(zip(self.group_names, np.asarray(self.groups).T))
+            data = DataFrame.from_dict(data_dict)
+            grouped = data.groupby(self.group_names)
+            survival = grouped["survival"].cumprod().values
+            #from IPython.core.debugger import Pdb; Pdb().set_trace()
+            def get_std_err(x):
+                return (x["survival"].cumprod()**2 *
+                        (x["event"]/
+                         (x["nrisk"]*(x["nrisk"]-x["event"]))).cumsum()
+                        )**.5
+            std_err = grouped.apply(get_std_err)
         else:
-            ##Can remove second part of condition?
-            if exog.ndim == 2:
-                groups = stats._support.unique(exog)
-                self.groups = groups
-                ##ncols = len(exog[0])
-                ##groups = np.unique(exog)
-                ##groups = np.repeat(groups, ncols)
-                ##need different iterator for rows with repeats?
-                ##groups = itertools.permutations(groups, ncols)
-                ##groups = [i for i in groups]
-                ##groups = np.array(groups)
-                ##self.groups = 1
-                for g in groups:
-                    ##stats.adm for testing?
-                    ind = np.product(exog == g, axis=1) == 1
-                    if ind.any():
-                        t = times[ind]
-                        if censoring is not None:
-                            c = censoring[ind]
-                        else:
-                            c = None
-                        self._fitting_proc(t, c, CI_transform, force_CI_0_1)
-                        ##if self.groups is 1:
-                            ##self.groups = g
-                        ##else:
-                            ##self.groups = np.c_[self.groups, g]
-                ##self.groups = self.groups.T
-            else:
-                groups = np.unique(self.exog)
-                self.groups = groups
-                for g in groups:
-                    t = (times[exog == g])
-                    if not censoring is None:
-                        c = (censoring[exog == g])
-                    else:
-                        c = None
-                    self._fitting_proc(t, c, CI_transform, force_CI_0_1)
-        return KMResults(self, self.params, self.normalized_cov_params)
+            survival = np.cumprod(1 - hazard)
+            std_err = (survival**2 *
+                       np.cumsum(event/(nrisk*(nrisk-event))))**.5
 
-    def _fitting_proc(self, t, censoring, CI_transform, force_CI):
-        """
-        Fit one of the curves in the model
-
-        Parameters
-        ----------
-        t : array
-            vector of times (for one group only)
-        censoring : array
-            vector of censoring indicators (for one group only)
-        CI_transform : string, "log" or "log-log"
-            The type of transformation used to keep the
-            confidence interval in the interval [0,1].
-            "log" applies the natural logarithm,
-            "log-log" applies log(-log(x))
-        force_CI_0_1 : bool
-            indicator of whether confidence interval values
-            that fall outside of [0,1] should be forced to
-            one of the endpoints
-
-        Returns
-        -------
-        None, but adds values to attributes of the object
-        That are part of the results of the model for the given
-        group
-
-        """
-        if censoring is None:
-            n = len(t)
-            events = np.bincount(t)
-            t = np.unique(t)
-            events = events[:,list(t)]
-            events = events.astype(float)
-            eventsSum = np.cumsum(events)
-            eventsSum = np.r_[0,eventsSum]
-            n -= eventsSum[:-1]
-        else:
-            reverseCensoring = -1*(censoring - 1)
-            events = np.bincount(t,censoring)
-            censored = np.bincount(t,reverseCensoring)
-            t = np.unique(t)
-            censored = censored[:,list(t)]
-            censored = censored.astype(float)
-            censoredSum = np.cumsum(censored)
-            censoredSum = np.r_[0,censoredSum]
-            events = events[:,list(t)]
-            events = events.astype(float)
-            eventsSum = np.cumsum(events)
-            eventsSum = np.r_[0,eventsSum]
-            n = len(censoring) - eventsSum[:-1] - censoredSum[:-1]
-            (self.censorings).append(censored)
-        survival = np.cumprod(1-events/n)
-        var = ((survival*survival) *
-               np.cumsum(events/(n*(n-events))))
-        se = np.sqrt(var)
-        if CI_transform == "log":
-            lower = (np.exp(np.log(survival) - 1.96 *
-                                    (se * (1/(survival)))))
-            upper = (np.exp(np.log(survival) + 1.96 *
-                                    (se * (1/(survival)))))
-        if CI_transform == "log-log":
-            lower = (np.exp(-np.exp(np.log(-np.log(survival)) - 1.96 *
-                                    (se * (1/(survival * np.log(survival)))))))
-            upper = (np.exp(-np.exp(np.log(-np.log(survival)) + 1.96 *
-                                    (se * (1/(survival * np.log(survival)))))))
-        if force_CI:
-            lower[lower < 0] = 0
-            upper[upper > 1] = 1
-        self.params = np.r_[self.params,survival]
-        self.normalized_cov_params = np.r_[self.normalized_cov_params, se]
-        (self.results).append(np.array([survival,se,lower,upper]))
-        (self.ts).append(t)
-        (self.event).append(events)
+        # variance calculated according to Greenwood (1926)
+        results = np.c_[hazard, survival, std_err]
+        return KMResults(self, results)
 
 def get_td(data, ntd, td, td_times, censoring=None, times=None,
            ntd_names=None, td_name=None):
@@ -545,7 +553,148 @@ def get_td(data, ntd, td, td_times, censoring=None, times=None,
         else:
             return np.c_[start, td_times, ntd, td]
 
-class CoxPH(LikelihoodModel):
+def _loglike_breslow_exact(params, exog, times, event_idx, collapsed_data):
+    """
+    exog, times, and collapsed_data should be for each strata
+    """
+    fittedvalues = np.dot(exog, params)
+    exp_fittedvalues = np.exp(fittedvalues)
+    # drop observations with no events
+    collapsed_data = collapsed_data[collapsed_data[:,1] != 0]
+
+    # default partial likelihood
+    logL = np.dot(fittedvalues, event_idx)
+    for time_i, tied in collapsed_data:
+        at_risk = times >= time_i
+        logL -= sp_logsumexp(fittedvalues[at_risk]) * tied
+    return logL
+
+def _loglike_efron_exact(params, exog, times, event_idx, collapsed_data):
+    fittedvalues = np.dot(exog, params)
+    exp_fittedvalues = np.exp(fittedvalues)
+    # drop observations with no events
+    collapsed_data = collapsed_data[collapsed_data[:,1] != 0]
+
+    # default partial likelihood
+    logL = np.dot(fittedvalues, event_idx)
+    for time_i, tied in collapsed_data:
+        #event at time_i
+        ind = np.logical_and(event_idx, times == time_i)
+        at_risk = times >= time_i
+        logL -= np.sum(np.log(np.dot(exp_fittedvalues, at_risk)
+                - np.arange(tied)/tied * np.dot(exp_fittedvalues, ind)))
+    return logL
+
+_coxph_loglike_funcs = {
+                  "efron" : _loglike_efron_exact,
+                  "breslow" : _loglike_breslow_exact,
+        }
+
+def _score_breslow(params, exog, times, event_idx, collapsed_data):
+    score = np.sum(exog[event_idx], axis=0)
+    fittedvalues = np.dot(exog, params)
+    exp_fittedvalues = np.exp(fittedvalues)
+    for time_i, tied in collapsed_data:
+        at_risk = times >= time_i
+        exp_fittedvalues_j = exp_fittedvalues[at_risk]
+        X_j = exog[at_risk]
+        score -= tied * (np.dot(exp_fittedvalues_j, X_j)/
+                         np.sum(exp_fittedvalues_j))
+
+    return score
+
+def _score_efron(params, exog, times, event_idx, collapsed_data):
+    fittedvalues = np.dot(exog, params)
+    exp_fittedvalues = np.exp(fittedvalues)
+    # drop those that didn't have an event
+    collapsed_data = collapsed_data[collapsed_data[:,1] != 0]
+    score = np.sum(exog[event_idx], axis=0)
+    for time_i, tied in collapsed_data:
+        had_event_i = np.logical_and(event_idx, times == time_i)
+        at_risk = times >= time_i
+        exp_fittedvalues_j = exp_fittedvalues[at_risk]
+        exp_fittedvalues_i = exp_fittedvalues[had_event_i]
+        num1 = np.dot(exp_fittedvalues_j, exog[at_risk])
+        num2 = np.dot(exp_fittedvalues_i, exog[had_event_i])
+        de1 = exp_fittedvalues_j.sum()
+        de2 = exp_fittedvalues_i.sum()
+        c = (np.arange(tied)/tied)[:,None]
+        score -= np.sum((num1 - c * num2) / (de1 - c * de2), axis=0)
+    return score
+
+_coxph_score_funcs = {"efron" : _score_efron,
+                      "breslow" : _score_breslow}
+
+def _hessian_efron(params, exog, times, event_idx, collapsed_data):
+    params = np.atleast_1d(params) # powell seems to squeeze, messing up dims
+    fittedvalues = np.dot(exog, params)
+    exp_fittedvalues = np.exp(fittedvalues)
+    collapsed_data = collapsed_data[collapsed_data[:,1] != 0]
+    hess = 0
+
+    for time_i, tied in collapsed_data:
+        had_event_i = np.logical_and(event_idx, times == time_i)
+        at_risk = times >= time_i
+        exp_fittedvalues_j = exp_fittedvalues[at_risk]
+        Xj = exog[at_risk]
+        exp_fittedvalues_i = exp_fittedvalues[had_event_i]
+        Xi = exog[had_event_i]
+        exp_fittedvalues_Xj = np.dot(exp_fittedvalues_j, Xj)
+        exp_fittedvalues_Xi = np.dot(exp_fittedvalues_i, Xi)
+        num1 = np.dot(Xj.T, (Xj * exp_fittedvalues_j[:, None]))
+        num2 = np.dot(Xi.T, (Xi * exp_fittedvalues_i[:, None]))
+        de1 = exp_fittedvalues_j.sum()
+        de2 = exp_fittedvalues_i.sum()
+
+        #TODO: replace this with broadcasting
+        for i in range(int(tied)):
+            c = i/float(tied)
+            num3 = (exp_fittedvalues_Xj - c * exp_fittedvalues_Xi)
+            de = de1 - c * de2
+            hess += (((num1 - c * num2) / (de)) -
+                     (np.dot(num3[:, None], num3[None,:])
+                      / (de**2)))
+    return hess
+#return np.atleast_2d(hess)
+
+def _hessian_breslow(params, exog, times, event_idx, collapsed_data):
+    params = np.atleast_1d(params) # powell seems to squeeze, messing up dims
+    fittedvalues = np.dot(exog, params)
+    exp_fittedvalues = np.exp(fittedvalues)
+    collapsed_data = collapsed_data[collapsed_data[:,1] != 0]
+    hess = 0
+    for time_i, tied in collapsed_data:
+        at_risk = times >= time_i
+        exp_fittedvalues_j = exp_fittedvalues[at_risk]
+        Xj = exog[at_risk]
+        exp_fittedvalues_X = np.mat(np.dot(exp_fittedvalues_j, Xj))
+        #TODO: Save more variables to avoid recalulation?
+        hess += ((((np.dot(Xj.T, (Xj * exp_fittedvalues_j[:, None])))/
+                    (exp_fittedvalues_j.sum()))
+                 - ((np.array(exp_fittedvalues_X.T * exp_fittedvalues_X))/((exp_fittedvalues_j.sum())**2))) * tied)
+    return hess
+
+_coxph_hessian_funcs = {"efron" : _hessian_efron,
+                        "breslow" : _hessian_breslow}
+
+def _coxph_group_arguments_factory(model, params):
+    """
+    Returns a generator that yields the arguments that are necessary
+    for all the loglike, score, and hessian functions for CoxPH.
+    """
+    for group_name, endog, exog in model.data.group_by_groups():
+        times = endog[:,0]
+        event_idx = endog[:,1].astype(bool)
+        collapsed_groups = model.collapsed_groups
+        if group_name is not None:
+            #TODO: make sure this an array anyway
+            collapsed_idx = np.array(collapsed_groups == group_name).squeeze()
+            collapsed_data = model.collapsed_data[collapsed_idx]
+        else:
+            collapsed_data = model.collapsed_data
+        yield params, exog, times, event_idx, collapsed_data[:,:2]
+
+class CoxPH(SurvivalModel, LikelihoodModel):
     """
     Fit a cox proportional harzard model from survival data
 
@@ -592,587 +741,99 @@ class CoxPH(LikelihoodModel):
     D. R. Cox. "Regression Models and Life-Tables",
         Journal of the Royal Statistical Society. Series B (Methodological)
         Vol. 34, No. 2 (1972), pp. 187-220
-
     """
 
-    ##Add efron fitting, and other methods
-    ##Add stratification
     ##Handling for time-dependent covariates
     ##Handling for time-dependent coefficients
     ##Interactions
     ##Add residuals
-    ##function for using different ttype when fitting?
 
-
-    def __init__(self, surv, exog, data=None, ties="efron", strata=None,
-                 names=None):
-        if names is None:
-            #TODO: list or array
-            names = ['var%2d'% i for i in range(exog.shape[1])]
-        self.names = names
-        self.surv = surv
+    def __init__(self, surv, exog, groups=None, ties="efron", missing='none'):
+        super(CoxPH, self).__init__(surv, exog, groups=groups, missing=missing,
+                                    hasconst=None)
+        #TODO: what to do with hasconst?
         self.ties = ties
-        censoring = surv.censoring
-        if surv.type == "exact":
-            self.ttype = "exact"
-            times = surv.times
-        elif surv.type == "interval":
-            self.ttype = "interval"
-            ##Just for testing, may need to change
-            times = np.c_[surv.start,surv.end]
-            self.test = times
-        if data is not None:
-            data = np.asarray(data)
-            if data.ndim != 2:
-                raise ValueError("Data array must be 2d")
-            exog = data[:,exog]
-        else:
-            exog = np.asarray(exog)
-        if exog.dtype == float or exog.dtype == int:
-            if censoring is not None:
-                data = np.c_[times,censoring,exog]
-                data = data[~np.isnan(data).any(1)]
-                if surv.type == "exact":
-                    self.times = (data[:,0]).astype(int)
-                    self.censoring = (data[:,1]).astype(int)
-                    self.exog = data[:,2:]
-                elif surv.type == "interval":
-                    self.times = data[:,0:2].astype(int)
-                    self.censoring = (data[:,2]).astype(int)
-                    self.exog = data[:,3:]
-            else:
-                data = np.c_[times,exog]
-                data = data[~np.isnan(data).any(1)]
-                self.times = (data[:,0]).astype(int)
-                self.exog = data[:,1:]
-            del(data)
-        else:
-            if surv.type == "interval":
-                ind = ~np.isnan(times).any(1)
-            elif surv.type == "exact":
-                ind = ~np.isnan(times)
-            exog = exog[ind]
-            if censoring is not None:
-                censoring = censoring[ind]
-            times = times[ind]
-            if censoring is not None:
-                times = (times[~np.isnan(censoring)]).astype(int)
-                exog = exog[~np.isnan(censoring)]
-                censoring = (censoring[~np.isnan(censoring)]).astype(int)
-            if exog.ndim == 2:
-                self.times = (times[~np.isnan(exog).any(1)]).astype(int)
-                self.censoring = (censoring[~np.isnan(exog).any(1)]).astype(int)
-                self.exog = (exog[~np.isnan(exog).any(1)]).astype(float)
-            else:
-                self.times = (times[~np.isnan(exog)]).astype(int)
-                self.censoring = (censoring[~np.isnan(exog)]).astype(int)
-                self.exog = (exog[~np.isnan(exog)]).astype(float)
-        if strata is not None:
-            self.stratify(strata, copy=False)
-        else:
-            self.strata = None
-        ##Not need for stratification?
-        ##List of ds for stratification?
-        ##?
-        if surv.type == "interval":
-            ##np.unique for times, then add on a column in d
-            ##with 0,times[:-1] as its elements
-            ##times = self.times[:,1]
-            self.d = stats._support.unique(self.times)
-        ##if surv.type == "interval":
-                ##times = np.c_[np.r_[0,times[:-1]],times]
-        elif surv.type == "exact":
-            times = self.times
-            d = np.bincount(times,self.censoring)
-            times = np.unique(times)
-            d = d[:,list(times)]
-            self.d = (np.c_[times, d]).astype(float)
-        self.df_resid = len(self.exog) - 1
         self.confint_dist = stats.norm
         self.exog_mean = self.exog.mean(axis=0)
 
-    def stratify(self, stratas, copy=True):
-        """
-        Create a CoxPH object to fit a model with stratification
-
-        Parameters
-        ----------
-        stratas: list
-            list of indicies of columns of the matrix
-            of exogenous variables that are to be included as
-            strata. All other columns will be included as unstratified
-            variables
-        copy: bool
-            If true then a new CoxPH object will be returned. If false, then
-            the current object will be overwritten.
-
-        Returns
-        -------
-        cox/None : CoxPH instance or None
-            If copy is true, returns an instance of class CoxPH, if copy is
-            False modifies existing cox model, and returns nothing
-
-        Examples
-        --------
-
-        References
-        ----------
-
-        Lisa Borsi, Marc Lickes & Lovro Soldo. "The Stratified Cox Procedure",
-            http://stat.ethz.ch/education/semesters/ss2011/seminar/contents/presentation_5.pdf
-            2011
-
-        """
-        #TODO: should this return self if copy=True?
-
-        stratas = np.asarray(stratas)
-        exog = self.exog
-        strata = exog[:,stratas]
-        #keep only non-strata names
-        names = [v for i,v in enumerate(self.names) if not i in stratas]
-        #exog = exog.compress(stratas, axis=1)
-        if strata.ndim == 1:
-            groups = np.unique(strata)
-        elif strata.ndim == 2:
-            groups = stats._support.unique(strata)
-        if copy:
-            model = CoxPH(self.surv, exog, ties=self.ties, strata=stratas,
-                          names=names)
-            ##redundent in some cases?
-            #model.exog = exog.compress(stratas, axis=1)
-            #model.strata_groups = groups
-            #model.strata = strata
-            return model
-        else:
-            self.strata_groups = groups
-            self.strata = strata
-            self.names = names
-            ##Need to check compress with 1-element stratas and
-            ##non-boolean strafying vectors
-            self.exog = exog.compress(~np.in1d(np.arange(len(exog[0])),
-                                               stratas), axis=1)
-
-    def _stratify_func(self, b, f):
-        """
-        apply loglike, score, or hessian for all strata of the model
-
-        Parameters
-        ----------
-        b : array-like
-            vector of parameters at which the function is to be evaluated
-        f : function
-            the function to evaluate the parameters at; either loglike,
-            score, or hessian
-
-        Returns
-        -------
-        Value of the function evaluated at b
-
-        """
-
-        exog = self.exog
-        times = self.times
-        censoring = self.censoring
-        d = self.d
-        #test in the actual functions (e.g. loglike)?
-        if self.strata is None:
-            self._str_exog = exog
-            self._str_times = times
-            self._str_d = d
-            if censoring is not None:
-                self._str_censoring = censoring
-            return f(b)
-        else:
-            strata = self.strata
-            logL = 0
-            for g in self.strata_groups:
-                ##Save ind instead of _str_ vars (handle d?)?
-                if strata.ndim == 2:
-                    ind = np.product(strata == g, axis=1) == 1
-                else:
-                    ind = strata == g
-                self._str_exog = exog[ind]
-                _str_times = times[ind]
-                self._str_times = _str_times
-                if censoring is not None:
-                    _str_censoring = censoring[ind]
-                    self._str_censoring = _str_censoring
-                ds = np.bincount(_str_times,_str_censoring)
-                _str_times = np.unique(_str_times)
-                ds = ds[:,list(_str_times)]
-                self._str_d = (np.c_[_str_times, ds]).astype(float)
-                #self._str_d = d[np.in1d(d[:,0], _str_times)]
-                logL += f(b)
-            return logL
-
-    def loglike(self, b):
-        """
-        Calculate the value of the log-likelihood at estimates of the
-        parameters for all strata
-
-        Parameters
-        ----------
-        b : vector of parameter estimates
-
-        Returns
-        -------
-        value of log-likelihood as a float
-
-        """
-
-        return self._stratify_func(b, self._loglike_proc)
-
-    def score(self, b):
-        """
-        Calculate the value of the score function at estimates of the
-        parameters for all strata
-
-        Parameters
-        ----------
-        b : vector of parameter estimates
-
-        Returns
-        -------
-        value of score function as an array of floats
-
-        """
-
-        return self._stratify_func(b, self._score_proc)
-
-    def hessian(self, b):
-        """
-        Calculate the value of the hessian at estimates of the
-        parameters for all strata
-
-        Parameters:
-        ------------
-        b : vector of parameter estimates
-
-        Returns
-        -------
-        value of hessian for strata as an array of floats
-
-        """
-
-        return self._stratify_func(b, self._hessian_proc)
-
-    def _loglike_proc(self, b):
-        """
-        Calculate the value of the log-likelihood at estimates of the
-        parameters for a single strata
-
-        Parameters:
-        ------------
-        b : vector of parameter estimates
-
-        Returns
-        -------
-        value of log-likelihood for strata as a float
-
-        """
-
-        ttype = self.ttype
-        ties = self.ties
-        exog = self._str_exog
-        times = self._str_times
-        censoring = self._str_censoring
-        d = self._str_d
-        BX = np.dot(exog, b)
-        thetas = np.exp(BX)
-        d = d[d[:,1] != 0]
-        c_idx = censoring == 1
-        if ties == "efron":
-            logL = 0
-            if ttype == "exact":
-                for t in range(len(d[:,0])):
-                    ind = (c_idx) * (times == d[t,0])
-                    tied = d[t,1]
-                    logL += ((np.dot(exog[ind], b)).sum()
-                             - (np.log((thetas[times >= d[t,0]]).sum()
-                                       - ((np.arange(tied))/tied)
-                                       * (thetas[ind]).sum()).sum()))
-            elif ttype == "interval":
-                for t in d:
-                    tind = np.product(times == t, axis=1).astype(bool)
-                    if tind.any():
-                        ind = ((c_idx) * (tind)).astype(bool)
-                        if ind.any():
-                            tied = np.sum(ind)
-                            risk = ((times[:,1] >= t[1])
-                                    * (t[0] >= times[:,0])).astype(bool)
-                            logL += np.dot(exog[ind], b).sum()
-                            thetai = thetas[risk].sum()
-                            thetaj = thetas[ind].sum()
-                            ##do without loop? (e.g. (arange(tied)/tied).sum())
-                            for i in range(int(tied)):
-                                c = i/float(tied)
-                                logL -= np.log(thetai - c * thetaj)
-
-        #                    logL += term((np.dot(exog[ind], b)).sum()
-        #                            - (np.log((thetas[risk]).sum()
-        #                                       - ((np.arange(tied))/tied)
-        #                                       * (thetas[ind]).sum()).sum()))
-        elif ties == "breslow":
-            logL = (BX[c_idx]).sum()
-            if ttype == "exact":
-                for t in range(len(d[:,0])):
-                    logL -= ((np.log((thetas[times >= d[t,0]]).sum()))
-                             * d[t,1])
-            elif ttype == "interval":
-                for t in d:
-                    tind = np.product(times == t, axis=1).astype(bool)
-                    ##Take out condition?
-                    if tind.any():
-                        ind = (c_idx) * (tind)
-                        if ind.any():
-                            logL -= (np.sum(ind) *
-                            (np.log(thetas[((times[:,1] >= t[1]) *
-                                            (t[0] >= times[:,0])
-                                            ).astype(bool)].sum())))
-        return logL
-
-    def _score_proc(self, b):
-        """
-        Calculate the score vector of the log-likelihood at estimates of the
-        parameters for a single strata
-
-        Parameters
-        ----------
-        b : vector of parameter estimates
-
-        Returns
-        -------
-        value of score for strata as 1d array
-
-        """
-
-        ttype = self.ttype
-        ties = self.ties
-        exog = self._str_exog
-        times = self._str_times
-        censoring = self._str_censoring
-        d = self._str_d
-        BX = np.dot(exog, b)
-        thetas = np.exp(BX)
-        d = d[d[:,1] != 0]
-        c_idx = censoring == 1
-        if ties == "efron":
-            score = 0
-            if ttype == 'exact':
-                for t in range(len(d[:,0])):
-                    ind = (c_idx) * (times == d[t,0])
-                    tied = d[t,1]
-                    ind2 = times >= d[t,0]
-                    thetaj = thetas[ind2]
-                    Xj = exog[ind2]
-                    thetai = thetas[ind]
-                    Xi = exog[ind]
-                    num1 = np.dot(thetaj, Xj)
-                    num2 = np.dot(thetai, Xi)
-                    de1 = thetaj.sum()
-                    de2 = thetai.sum()
-                    score += Xi.sum(0)
-                    for i in range(int(tied)):
-                        c = i/float(tied)
-                        score -= (num1 - c * num2) / (de1 - c * de2)
-            elif ttype == 'interval':
-                for t in d:
-                    tind = np.product(times == t, axis=1).astype(bool)
-                    if tind.any():
-                        ind = ((c_idx) * (tind)).astype(bool)
-                        if ind.any():
-                            tied = np.sum(ind)
-                            risk = ((times[:,1] >= t[1])
-                                    * (t[0] >= times[:,0])).astype(bool)
-                            thetaj = thetas[risk]
-                            Xj = exog[risk]
-                            thetai = thetas[ind]
-                            Xi = exog[ind]
-                            num1 = np.dot(thetaj, Xj)
-                            num2 = np.dot(thetai, Xi)
-                            de1 = thetaj.sum()
-                            de2 = thetai.sum()
-                            score += Xi.sum(0)
-                            for i in range(int(tied)):
-                                c = i/float(tied)
-                                score -= (num1 - c * num2) / (de1 - c * de2)
-        elif ties == "breslow":
-            score = (exog[c_idx]).sum(0)
-            if ttype == 'exact':
-                for t in range(len(d[:,0])):
-                    ind = times >= d[t,0]
-                    thetaj = thetas[ind]
-                    Xj = exog[ind]
-                    score -= ((np.dot(thetaj, Xj))/(thetaj.sum()) *
-                                      d[t,1])
-            elif ttype == 'interval':
-                for t in d:
-                    tind = np.product(times == t, axis=1).astype(bool)
-                    if tind.any():
-                        ind = ((c_idx) * (tind)).astype(bool)
-                        if ind.any():
-                            tied = np.sum(ind)
-                            risk = ((times[:,1] >= t[1])
-                                    * (t[0] >= times[:,0])).astype(bool)
-                            thetaj = thetas[risk]
-                            Xj = exog[risk]
-                            score -= ((np.dot(thetaj, Xj))/(thetaj.sum()) *
-                                      tied)
-        return score
-
-    def _hessian_proc(self, b):
-        """
-        Calculate the hessian matrix of the log-likelihood at estimates of the
-        parameters for a single strata
-
-        Parameters:
-        ------------
-        b : vector of parameter estimates
-
-        Returns
-        -------
-        value of hessian for strata as 2d array
-
-        """
-
-        ttype = self.ttype
-        ties = self.ties
-        exog = self._str_exog
-        times = self._str_times
-        censoring = self._str_censoring
-        d = self._str_d
-        BX = np.dot(exog, b)
-        thetas = np.exp(BX)
-        d = d[d[:,1] != 0]
-        hess = 0
-
-        if ties == "efron":
-            c_idx = censoring == 1
-            if ttype == 'exact':
-                for t in range(len(d[:,0])):
-                    ind = (c_idx) * (times == d[t,0])
-                    ind2 = times >= d[t,0]
-                    thetaj = thetas[ind2]
-                    Xj = exog[ind2]
-                    thetai = thetas[ind]
-                    Xi = exog[ind]
-                    thetaXj = np.dot(thetaj, Xj)
-                    thetaXi = np.dot(thetai, Xi)
-                    tied = d[t,1]
-                    num1 = np.dot(Xj.T, (Xj * thetaj[:,np.newaxis]))
-                    num2 = np.dot(Xi.T, (Xi * thetai[:,np.newaxis]))
-                    de1 = thetaj.sum()
-                    de2 = thetai.sum()
-                    for i in range(int(tied)):
-                        c = i/float(tied)
-                        num3 = (thetaXj - c * thetaXi)
-                        de = de1 - c * de2
-                        hess += (((num1 - c * num2) / (de)) -
-                                 (np.dot(num3[:,np.newaxis], num3[np.newaxis,:])
-                                  / (de**2)))
-            elif ttype == 'interval':
-                for t in d:
-                    tind = np.product(times == t, axis=1).astype(bool)
-                    if tind.any():
-                        ind = ((c_idx) * (tind)).astype(bool)
-                        if ind.any():
-                            tied = np.sum(ind)
-                            risk = ((times[:,1] >= t[1])
-                                    * (t[0] >= times[:,0])).astype(bool)
-                            thetaj = thetas[risk]
-                            Xj = exog[risk]
-                            thetai = thetas[ind]
-                            Xi = exog[ind]
-                            thetaXj = np.dot(thetaj, Xj)
-                            thetaXi = np.dot(thetai, Xi)
-                            num1 = np.dot(Xj.T, (Xj * thetaj[:,np.newaxis]))
-                            num2 = np.dot(Xi.T, (Xi * thetai[:,np.newaxis]))
-                            de1 = thetaj.sum()
-                            de2 = thetai.sum()
-                            for i in range(int(tied)):
-                                c = i/float(tied)
-                                num3 = (thetaXj - c * thetaXi)
-                                de = de1 - c * de2
-                                hess += (((num1 - c * num2) / (de)) -
-                                         (np.dot(num3[:,np.newaxis], num3[np.newaxis,:])
-                                          / (de**2)))
-        elif ties == "breslow":
-            if ttype == 'exact':
-                for t in range(len(d[:,0])):
-                    ind = times >= d[t,0]
-                    thetaj = thetas[ind]
-                    Xj = exog[ind]
-                    thetaX = np.mat(np.dot(thetaj, Xj))
-                    ##Save more variables to avoid recalulation?
-                    hess += ((((np.dot(Xj.T, (Xj * thetaj[:,np.newaxis])))/(thetaj.sum()))
-                             - ((np.array(thetaX.T * thetaX))/((thetaj.sum())**2))) *
-                             d[t,1])
-            elif ttype == 'interval':
-                for t in d:
-                    tind = np.product(times == t, axis=1).astype(bool)
-                    if tind.any():
-                        ind = ((c_idx) * (tind)).astype(bool)
-                        if ind.any():
-                            tied = np.sum(ind)
-                            risk = ((times[:,1] >= t[1])
-                                    * (t[0] >= times[:,0])).astype(bool)
-                            thetaj = thetas[risk]
-                            Xj = exog[risk]
-                            thetaX = np.mat(np.dot(thetaj, Xj))
-                            ##Save more variables to avoid recalulation?
-                            hess += ((((np.dot(Xj.T, (Xj * thetaj[:,np.newaxis])))/(thetaj.sum()))
-                                     - ((np.array(thetaX.T * thetaX))/((thetaj.sum())**2))) *
-                                     tied)
-        return -hess
-
-    def information(self, b):
+    def information(self, params):
         """
         Calculate the Fisher information matrix at estimates of the
         parameters
 
         Parameters
         ----------
-        b : estimates of the model parameters
+        params : estimates of the model parameters
 
         Returns
         -------
         information matrix as 2d array
 
         """
-        return -self.hessian(b)
+        return -self.hessian(params)
 
-    def covariance(self, b):
+    def loglike(self, params):
+        # use built-in sum on generator
+        return sum(starmap(_coxph_loglike_funcs[self.ties],
+                              _coxph_group_arguments_factory(self, params)))
 
-        """
-        Calculate the covariance matrix at estimates of the
-        parameters
+    def score(self, params):
+        # use built-in sum on generator
+        return sum(starmap(_coxph_score_funcs[self.ties],
+                              _coxph_group_arguments_factory(self, params)))
 
-        Parameters
-        ----------
-
-        b : estimates of the model parameters
-
-        Returns
-        -------
-
-        covariance matrix as 2d array
-
-        """
-        return la.pinv(self.information(b))
+    def hessian(self, params):
+        # use built-in sum on generator
+        return -sum(starmap(_coxph_hessian_funcs[self.ties],
+                              _coxph_group_arguments_factory(self, params)))
 
     def fit(self, start_params=None, method='newton', maxiter=100,
-            full_output=1,disp=1, fargs=(), callback=None, retall=0, **kwargs):
+            full_output=1, disp=1, callback=None, retall=0, **kwargs):
         if start_params is None:
             self.start_params = np.zeros_like(self.exog[0])
         else:
             self.start_params = start_params
-        results = super(CoxPH, self).fit(start_params, method, maxiter,
-            full_output,disp, fargs, callback, retall, **kwargs)
-        return CoxResults(self, results.params,
-                               self.covariance(results.params),
-                          names=self.names)
 
-class KMResults(LikelihoodModelResults):
+        fargs = (self.exog, self.time, self.event.astype(bool),
+                self.collapsed_data[:,:2])
+
+        #TODO: this magic is going to screw up the docs.
+        ties = self.ties
+        #self.loglike = lambda x : _coxph_loglike_funcs[ties](self, x, *fargs)
+        #self.score = lambda x : _coxph_score_funcs[ties](self, x, *fargs)
+        #self.hessian = lambda x : -_coxph_hessian_funcs[ties](self, x, *fargs)
+
+        results = super(CoxPH, self).fit(start_params, method=method,
+                        maxiter=maxiter, full_output=full_output,
+                        disp=disp, callback=callback, retall=retall, **kwargs)
+        return CoxResults(self, results.params)
+
+def unstack_groups(X, group_keys, group_names, ynames, join_char="_"):
+    """
+    Takes grouped data and unstacked creating new variables ie.,
+    time, event, group
+    1,    1,     1
+    2,    0,     1
+    2,    1,     2
+
+    becomes
+
+    time, event_1, event_2
+    1,    1,       nan
+    2,    0,       1
+
+    In this example, "time" is the non-unique index, group_keys is [1,2],
+    group_names is ["group"], and ynames is ["event"]
+    """
+    for name in group_keys:
+        for yname in ynames:
+            new_name = yname + join_char + join_char.join(str(name))
+            X[new_name] = np.nan
+            X.ix[X[group_names] == name, new_name] = X[yname]
+    return X
+
+
+class KMResults(object):
     """
     Results for a Kaplan-Meier model
 
@@ -1191,251 +852,255 @@ class KMResults(LikelihoodModelResults):
 
     ##Add handling for stratification
 
-    def __init__(self, model, params, normalized_cov_params=None, scale=1.0):
-        super(KMResults, self).__init__(model, params, normalized_cov_params,
-                                        scale)
-        self.results = model.results
-        self.times = model.times
-        self.ts = model.ts
-        self.censoring = model.censoring
-        self.censorings = model.censorings
-        self.exog = model.exog
-        self.event = model.event
-        self.groups = model.groups
+    def __init__(self, model, results):
+        self.model = model
+        self.hazard = results[:,0]
+        self.survival = results[:,1]
+        self.std_err = results[:, 2] # std err of survival function
+        self.groups = model.data.groups
 
-    def test_diff(self, groups, rho=None, weight=None):
-
+    @cache_readonly
+    def cumhazard(self):
         """
-        Test for difference between survival curves
+        Cumulative hazard function as defined by Peterson as -log(survival)
+        """
+        return -np.log(self.survival)
+
+    @cache_readonly
+    def std_err_cumhazard(self):
+        """
+        The standard error of the cumulative hazard function.
+        """
+        #NOTE: the cumulative hazard function is assumed to be
+        # -log(survival) where survival is calculated using the product-limit
+        # estimate of Peterson rather than the Nelson-Aalen estimate
+        return ((self.std_err ** 2)/self.survival**2)**.5
+
+    def conf_int_hazard(self, alpha=.05):
+        """
+        Confidence intervals for the cumulative hazard function
 
         Parameters
         ----------
-        groups : list
-            A list of the values for exog to test for difference.
-            tests the null hypothesis that the survival curves for all
-            values of exog in groups are equal
-        rho : int in [0,1]
-            compute the test statistic with weight S(t)^rho, where
-            S(t) is the pooled estimate for the Kaplan-Meier survival function.
-            If rho = 0, this is the logrank test, if rho = 0, this is the
-            Peto and Peto modification to the Gehan-Wilcoxon test.
-        weight : function
-            User specified function that accepts as its sole arguement
-            an array of times, and returns an array of weights for each time
-            to be used in the test
-
-        Returns
-        -------
-        res : ndarray
-            An array whose zeroth element is the chi-square test statistic for
-            the global null hypothesis, that all survival curves are equal,
-            the index one element is degrees of freedom for the test, and the
-            index two element is the p-value for the test.
-
-        Examples
-        --------
-
-        >>> import scikits.statsmodels.api as sm
-        >>> import matplotlib.pyplot as plt
-        >>> import numpy as np
-        >>> from scikits.statsmodels.sandbox.survival2 import KaplanMeier
-        >>> dta = sm.datasets.strikes.load()
-        >>> dta = dta.values()[-1]
-        >>> censoring = np.ones_like(dta[:,0])
-        >>> censoring[dta[:,0] > 80] = 0
-        >>> dta = np.c_[dta,censoring]
-        >>> km = KaplanMeier(dta,0,exog=1,censoring=2)
-        >>> results = km.fit()
-
-        Test for difference of survival curves
-
-        >>> log_rank = results.test_diff([0.0645,-0.03957])
-
-        The zeroth element of log_rank is the chi-square test statistic
-        for the difference between the survival curves using the log rank test
-        for exog = 0.0645 and exog = -0.03957, the index one element
-        is the degrees of freedom for the test, and the index two element
-        is the p-value for the test
-
-        >>> wilcoxon = results.test_diff([0.0645,-0.03957], rho=1)
-
-        wilcoxon is the equivalent information as log_rank, but for the
-        Peto and Peto modification to the Gehan-Wilcoxon test.
-
-        User specified weight functions
-
-        >>> log_rank = results.test_diff([0.0645,-0.03957], weight=np.ones_like)
-
-        This is equivalent to the log rank test
-
-        More than two groups
-
-        >>> log_rank = results.test_diff([0.0645,-0.03957,0.01138])
-
-        The test can be performed with arbitrarily many groups, so long as
-        they are all in the column exog
-
+        alpha : float
+            Confidence interval level
+        transform : string, "log" or "cloglog"
+            The type of transformation used to keep the
+            confidence interval in the interval [0,1].
+            "log" applies the natural logarithm,
+            "cloglog" applies the complementary cloglog log(-log(x))
+        force : bool
+            indicator of whether confidence interval values
+            that fall outside of [0,1] should be forced to
+            one of the endpoints
         """
+        survival = self.survival
+        std_err = self.std_err_hazard
 
-        groups = np.asarray(groups)
-        exog = self.exog
-        pooled = self.groups
-        if exog is None:
-            raise ValueError("Need an exogenous variable for tests")
+        cut_off = stats.norm.ppf(1-alpha/2.)
+        if transform == "log":
+            lower = np.exp(np.log(survival) - cut_off * std_err *
+                                                1/survival)
+            upper = np.exp(np.log(survival) + cut_off * std_err *
+                                                1/survival)
+        elif transform == "cloglog":
+            lower = np.exp(-np.exp(np.log(-np.log(survival)) - cut_off *
+                                std_err * 1/(survival * np.log(survival))))
+            upper = np.exp(-np.exp(np.log(-np.log(survival)) + cut_off *
+                                std_err * 1/(survival * np.log(survival))))
+        if force:
+            lower[lower < 0] = 0
+            upper[upper > 1] = 1
 
-        elif (np.in1d(groups,self.groups)).all():
-            if pooled.ndim == 1:
-                ind = np.in1d(exog,groups)
-                t = self.times[ind]
-            else:
-                ind = 0
-                for g in groups:
-                    ##More elegant method, append times?
-                    ind += np.product(exog == g, axis=1)
-                ind = ind > 0
-                t = self.times[ind]
-                self.t_idx = ind
-            if not self.censoring is None:
-                censoring = self.censoring[ind]
-                self.cen = censoring
-            else:
-                censoring = None
-            #del(ind)
-            tind = np.unique(t)
-            NK = []
-            N = []
-            D = []
-            Z = []
-            if rho is not None and weight is not None:
-                raise ValueError("Must use either rho or weights, not both")
+        return np.c_[lower, upper]
 
-            elif rho != None:
-                s = KaplanMeier(Survival(t,censoring=censoring))
-                s.fit()
-                s = (s.results[0][0]) ** (rho)
-                s = np.r_[1,s[:-1]]
+    #TODO: use patsy here?
+    #def test_diff(self, groups, rho=None, weight=None):
+    #    """
+    #    Test for difference between survival curves
 
-            elif weight is not None:
-                s = weight(tind)
+    #    Parameters
+    #    ----------
+    #    groups : list
+    #        A list of the values for exog to test for difference.
+    #        tests the null hypothesis that the survival curves for all
+    #        values of exog in groups are equal
+    #    rho : int in [0,1]
+    #        compute the test statistic with weight S(t)^rho, where
+    #        S(t) is the pooled estimate for the Kaplan-Meier survival
+    #        function.
+    #        If rho = 0, this is the logrank test, if rho = 0, this is the
+    #        Peto and Peto modification to the Gehan-Wilcoxon test.
+    #    weight : function
+    #        User specified function that accepts as its sole arguement
+    #        an array of times, and returns an array of weights for each time
+    #        to be used in the test
 
-            else:
-                s = np.ones_like(tind)
+    #    Returns
+    #    -------
+    #    res : ndarray
+    #        An array whose zeroth element is the chi-square test statistic for
+    #        the global null hypothesis, that all survival curves are equal,
+    #        the index one element is degrees of freedom for the test, and the
+    #        index two element is the p-value for the test.
 
-            if censoring is None:
-                ##Update with stratification
-                for g in groups:
-                    n = len(t)
-                    if pooled.ndim == 1:
-                        exog_idx = exog[ind] == g
-                    else:
-                        ##use .any(1)? no need all along axis=1
-                        exog_idx = (np.product(exog[ind] == g, axis=1)).astype(bool)
-                    dk = np.bincount(t[exog_idx])
-                    ##Save d (same for all?)
-                    d = np.bincount(t)
-                    if np.max(tind) != len(dk):
-                        dif = np.max(tind) - len(dk) + 1
-                        dk = np.r_[dk,[0]*dif]
-                    dk = dk[:,list(tind)]
-                    d = d[:,list(tind)]
-                    dk = dk.astype(float)
-                    d = d.astype(float)
-                    dkSum = np.cumsum(dk)
-                    dSum = np.cumsum(d)
-                    dkSum = np.r_[0,dkSum]
-                    dSum = np.r_[0,dSum]
-                    nk = len(exog[exog_idx]) - dkSum[:-1]
-                    n -= dSum[:-1]
-                    d = d[n>1]
-                    dk = dk[n>1]
-                    nk = nk[n>1]
-                    n = n[n>1]
-                    s = s[n>1]
-                    ek = (nk * d)/(n)
-                    Z.append(np.sum(s * (dk - ek)))
-                    NK.append(nk)
-                    N.append(n)
-                    D.append(d)
-            else:
-                for g in groups:
-                    if pooled.ndim == 1:
-                        exog_idx = exog == g
-                    else:
-                        exog_idx = (np.product(exog == g, axis=1)).astype(bool)
-                    reverseCensoring = -1*(censoring - 1)
-                    censored = np.bincount(t,reverseCensoring)
-                    ck = np.bincount(t[exog_idx],
-                                     reverseCensoring[exog_idx])
-                    dk = np.bincount(t[exog_idx],
-                                     censoring[exog_idx])
-                    d = np.bincount(t,censoring)
-                    if np.max(tind) != len(dk):
-                        dif = np.max(tind) - len(dk) + 1
-                        dk = np.r_[dk,[0]*dif]
-                        ck = np.r_[ck,[0]*dif]
-                    dk = dk[:,list(tind)]
-                    ck = ck[:,list(tind)]
-                    d = d[:,list(tind)]
-                    dk = dk.astype(float)
-                    d = d.astype(float)
-                    ck = ck.astype(float)
-                    dkSum = np.cumsum(dk)
-                    dSum = np.cumsum(d)
-                    ck = np.cumsum(ck)
-                    ck = np.r_[0,ck]
-                    dkSum = np.r_[0,dkSum]
-                    dSum = np.r_[0,dSum]
-                    censored = censored[:,list(tind)]
-                    censored = censored.astype(float)
-                    censoredSum = np.cumsum(censored)
-                    censoredSum = np.r_[0,censoredSum]
-                    nk = (len(exog[exog_idx]) - dkSum[:-1]
-                          - ck[:-1])
-                    n = len(censoring) - dSum[:-1] - censoredSum[:-1]
-                    d = d[n>1]
-                    dk = dk[n>1]
-                    nk = nk[n>1]
-                    n = n[n>1]
-                    s = s[n>1]
-                    ek = (nk * d)/(n)
-                    Z.append(np.sum(s * (dk - ek)))
-                    NK.append(nk)
-                    N.append(n)
-                    D.append(d)
-                    self.nk = nk
-                    self.d=d
-                    self.n = n
-                    self.dk = dk
-                    self.ek = ek
-                    self.testEx = exog
-                    self.g = g
-                    self.ein = exog_idx
-                    self.t = t
-            Z = np.array(Z)
-            N = np.array(N)
-            D = np.array(D)
-            NK = np.array(NK)
-            sigma = -1 * np.dot((NK/N) * ((N - D)/(N - 1)) * D
-                                * np.array([(s ** 2)]*len(D))
-                            ,np.transpose(NK/N))
-            np.fill_diagonal(sigma, np.diagonal(np.dot((NK/N)
-                                                  * ((N - D)/(N - 1)) * D
-                                                       * np.array([(s ** 2)]*len(D))
-                                                  ,np.transpose(1 - (NK/N)))))
-            chisq = np.dot(np.transpose(Z),np.dot(la.pinv(sigma), Z))
-            df = len(groups) - 1
-            self.var = sigma
-            self.N = N
-            self.D = D
-            self.NK = NK
-            self.Z = Z
-            return np.array([chisq, df, stats.chi2.sf(chisq,df)])
+    #    Examples
+    #    --------
+
+    #    >>> import statsmodels.api as sm
+    #    >>> import matplotlib.pyplot as plt
+    #    >>> import numpy as np
+    #    >>> from statsmodels.sandbox.survival2 import KaplanMeier
+    #    >>> dta = sm.datasets.strikes.load()
+    #    >>> dta = dta.values()[-1]
+    #    >>> censoring = np.ones_like(dta[:,0])
+    #    >>> censoring[dta[:,0] > 80] = 0
+    #    >>> dta = np.c_[dta,censoring]
+    #    >>> km = KaplanMeier(dta, 0, exog=1, censoring=2)
+    #    >>> results = km.fit()
+
+    #    Test for difference of survival curves
+
+    #    >>> log_rank = results.test_diff([0.0645,-0.03957])
+
+    #    The zeroth element of log_rank is the chi-square test statistic
+    #    for the difference between the survival curves using the log rank test
+    #    for exog = 0.0645 and exog = -0.03957, the index one element
+    #    is the degrees of freedom for the test, and the index two element
+    #    is the p-value for the test
+
+    #    >>> wilcoxon = results.test_diff([0.0645,-0.03957], rho=1)
+
+    #    wilcoxon is the equivalent information as log_rank, but for the
+    #    Peto and Peto modification to the Gehan-Wilcoxon test.
+
+    #    User specified weight functions
+
+    #    >>> log_rank = results.test_diff([0.0645,-0.03957], weight=np.ones_like)
+
+    #    This is equivalent to the log rank test
+
+    #    More than two groups
+
+    #    >>> log_rank = results.test_diff([0.0645,-0.03957,0.01138])
+
+    #    The test can be performed with arbitrarily many groups, so long as
+    #    they are all in the column exog
+
+    #    """
+
+    def test_diff(self, groups=None, test="logrank"):
+        model = self.model
+        if groups == None:
+            group_keys = model.data.group_keys
         else:
-            raise ValueError("groups must be in column exog")
+            #TODO: do some error checking here
+            group_keys = groups
+        n_groups = len(group_keys)
 
-    def isolate_curve(self, exog):
+        group_names = model.group_names
+        if len(group_names) == 1:
+            group_names = group_names[0]
+
+        ynames = model.endog_names
+        unstacked = model.data.data_with_groups.groupby(ynames[0]).apply(
+                        unstack_groups, group_keys, group_names, ynames[1:])
+
+        new_names = unstacked.columns.diff(ynames[1:])
+        unstacked = unstacked[new_names]
+
+        result = None
+        for name, group in unstacked.groupby(group_names):
+            group.set_index(ynames[0], inplace=True)
+            if result is not None:
+                result = result.reindex(result.index.union(group.index))
+                result.update(group)
+            else:
+                result = group
+
+        # if any events are nans they're changed to zeros
+        event = result.filter(regex=ynames[1]+".*").fillna(0)
+        nrisk = result.filter(regex="nrisk.*")
+        # back fill the nrisk columns
+        nrisk.fillna(method="backfill", inplace=True)
+        null_idx = isnull(nrisk)
+        if np.any(null_idx):
+            #TODO: there has GOT to be a better way to do this
+            # we need to replace the first NaN at the end of the time series
+            # with the last value minus the event number at the last value
+            # then forward fill
+            col_idx = np.where(null_idx.any(0))[0].tolist()
+            row_idx = [np.where(i)[0][0] for _,i in null_idx.T.iterrows() if
+                       np.where(i)[0].size]
+            # don't go negative
+            new_vals = np.maximum(0, (nrisk.shift(1).values -
+                        event.shift(1).values)[row_idx, col_idx])
+            nrisk.values[row_idx, col_idx] = new_vals
+            nrisk.fillna(method="pad", inplace=True)
+
+        # change them all back to arrays
+        nrisk = nrisk.values # all the at risks for each group
+        nrisk_j = nrisk.sum(1)[:,None] # all the at risks across groups
+        observed = event.sum().values
+        event = event.values # all the events for each group
+        event_j = event.sum(1)[:,None] # all the events across groups
+
+        if test.lower() == "wilcoxon":
+            weights = nrisk_j
+        elif test.lower() == "logrank":
+            weights = 1.
+        elif test.lower() == "tware":
+            weights = nrisk_j ** .5
+        else:
+            if test.lower() == "peto":
+                # modified survival function
+                mod_hazard = event_j / (nrisk_j + 1)
+                weights = np.cumprod(1 - mod_hazard)[:,None]
+            elif test.lower().startswith("fh"):
+                survival = KaplanMeier(self.model.surv).fit().survival[:,None]
+                import re
+                try:
+                    p, q = re.match("fh\((\d+),\s*(\d+)\)", test).groups()
+                except:
+                    raise ValueError("Syntax not understood %s" % test)
+                p, q = map(float, [p, q])
+                weights = np.r_[[[1]],
+                                survival[:-1] ** p * (1 - survival[:-1])**q]
+            else:
+                raise ValueError("Test %s not understood" % test)
+
+        expected = nrisk / nrisk_j * event_j
+        obs_exp = np.sum(weights*(event - expected), 0)
+        O_E2_div_E = obs_exp**2/expected.sum(0)
+
+        #sign is odd but this passes, nan_to_num because can get div by zero
+        V = -np.dot((weights**2*nrisk).T,
+                    np.nan_to_num(nrisk * event_j * (nrisk_j - event_j)/
+                                  (nrisk_j**2 * (nrisk_j - 1))))
+        V_diag = np.nansum(weights**2*nrisk * (nrisk_j - nrisk) * event_j *
+                           (nrisk_j - event_j)/(nrisk_j**2 * (nrisk_j - 1)),
+                           0)
+        np.fill_diagonal(V, V_diag)
+
+        chi2_stat = np.dot(np.dot(obs_exp, np.linalg.pinv(V)), obs_exp)
+        dof = n_groups - 1
+        pvalue = stats.chi2.sf(chi2_stat, dof)
+        dataframe = DataFrame(np.empty((n_groups, 5)),
+                                     columns=["nobs", "observed", "expected",
+                                              "(O-E)**2/E", "(O-E)**2/V"],
+                                     index=Index(group_keys,
+                                                        name=group_names))
+        dataframe.ix[:, "nobs"] = nrisk[0]
+        dataframe.ix[:, "observed"] = observed
+        dataframe.ix[:, "expected"] = expected.sum(0)
+        dataframe.ix[:, "(O-E)**2/E"] = O_E2_div_E
+        dataframe.ix[:, "(O-E)**2/V"] = obs_exp**2/V_diag
+        test_res = {"chi2" : chi2_stat, "dof" : dof, "pvalue" : pvalue}
+        return test_res, dataframe
+
+    def get_curve(self, group=None):
         """
-        Get results for one curve from a model that fits mulitple survival
+        Get results for one curve from a model that fits multiple survival
         curves
 
         Parameters
@@ -1448,77 +1113,116 @@ class KMResults(LikelihoodModelResults):
         -------
         kmres : KMResults instance
             A KMResults instance for the isolated curve
-
         """
-
-        exogs = self.exog
-        if exog is None:  #TODO: should this be exogs
+        if self.model.exog is None:
             raise ValueError("Already a single curve")
-        else:
-            ind = list(self.model.groups).index(exog)
-            results = self.results[ind]
-            ts = self.ts[ind]
-            if self.censoring is not None:
-                censoring = self.censoring[exogs == exog]
-                censorings = self.censorings[ind]
-            else:
-                censoring = None
-                censorings = []
-            event = self.event[ind]
-            r = KMResults(self.model, results[0], results[1])
-            r.results = results
-            ##Need to check
-            r.ts = []
-            r.ts.append(ts)
-            r.censoring = censoring
-            r.censorings = censorings
-            r.event = event
-            r.exog = None
-            r.groups = None
-            return r
 
-    def plot(self, confidence_band=False):
+        endog, exog = self.model.data.get_group(group)
+        time, event, censored = endog.T
+        return KMResults(KaplanMeier(Survival(time, event=event),
+                                     exog=[group]*len(time),
+                #TODO: do we attach missing attribute anywhere? we need to.
+                                     missing='none'),
+                                     {group : self.results[group]})
+
+    def conf_int(self, alpha=.05, transform="log", force=True):
+        """
+        Parameters
+        ----------
+        alpha : float
+            Confidence interval level
+        transform : string, "log" or "cloglog"
+            The type of transformation used to keep the
+            confidence interval in the interval [0,1].
+            "log" applies the natural logarithm,
+            "cloglog" applies the complementary cloglog log(-log(x))
+        force : bool
+            indicator of whether confidence interval values
+            that fall outside of [0,1] should be forced to
+            one of the endpoints
+        """
+        survival = self.survival
+        std_err = self.std_err
+
+        cut_off = stats.norm.ppf(1-alpha/2.)
+        if transform == "log":
+            lower = np.exp(np.log(survival) - cut_off * std_err *
+                                                1/survival)
+            upper = np.exp(np.log(survival) + cut_off * std_err *
+                                                1/survival)
+        elif transform == "cloglog":
+            lower = np.exp(-np.exp(np.log(-np.log(survival)) - cut_off *
+                                std_err * 1/(survival * np.log(survival))))
+            upper = np.exp(-np.exp(np.log(-np.log(survival)) + cut_off *
+                                std_err * 1/(survival * np.log(survival))))
+        if force:
+            # alternatively, we could use Kalbfleisch and Prentice (1980).
+            # to get MLE
+            lower[lower < 0] = 0
+            upper[upper > 1] = 1
+
+        return np.c_[lower, upper]
+
+    def plot(self, confidence_band=None, ci_transform="log", alpha=.05,
+                   ax=None, **plot_kwargs):
         """
         Plot the estimated survival curves.
 
         Parameters
         ----------
         confidence_band : bool
-            indicator of whether confidence bands should be plotted
+            Whether confidence bands should be plotted. If None, the default
+            is used. If there are no groups, confidence bands are plotted.
+            If the data is grouped, then the default is not to plot
+            confidence bandas.
+        ci_transform : {"log", "cloglog"}
 
-        Notes
+        alpha : float
+
+        ax : matplotlib.Axes, optional
+            Existing Axes instance.
+        plot_kwargs
+
+
+        Returns
         -----
-        After using this method do
-
-        plt.show()
-
-        to display the plot
-
-        TODO: bring into new format with ax ? options, extras in plot
-
+        figure : matplotlib.Figure
+            Figure instance.
         """
-        plt.figure()
-        if self.exog is None:
-            self._plotting_proc(0, confidence_band)
+        fig, ax = graphics_utils.create_mpl_ax(ax)
+
+        if confidence_band or (confidence_band == None and
+                               self.model.data.groups is None):
+            conf_int = self.conf_int(alpha=alpha, transform=ci_transform)
         else:
-            for g in range(len(self.groups)):
-                self._plotting_proc(g, confidence_band)
-        plt.ylim(ymax=1.05)
-        plt.ylabel('Survival')
-        plt.xlabel('Time')
+            conf_int = False
+            confidence_band = None
 
-    def summary(self):
-        """
-        Print a set of tables containing the estimates of the survival
-        function, and its standard errors
-        """
-        if self.exog is None:
-            self._summary_proc(0)
-        else:
-            for g in range(len(self.groups)):
-                self._summary_proc(g)
+        for group, endog, _ in self.model.data.group_by_groups():
+            time, event, censored = endog.T
+            if group is None:
+                survival = self.survival
+                if conf_int is not False:
+                    confidence_band = conf_int
+            else:
+                idx = np.squeeze(self.groups == group)
+                survival = self.survival[idx]
+                if conf_int is not False:
+                    confidence_band = conf_int[idx]
+            self._plot_curve(survival, time, event, censored,
+                             confidence_band, ax, linestyle='steps-post-',
+                             **plot_kwargs)
 
-    def _plotting_proc(self, g, confidence_band):
+
+        ax.set_ylim(-.05, 1.05)
+        ax.set_xlim(0, self.model.time.max() * 1.05)
+        ax.margins(.05, 0)
+        ax.set_ylabel('Survival')
+        ax.set_xlabel('Time')
+        return fig
+
+    def _plot_curve(self, survival, time, event, censored, confidence_band,
+                    ax, **plot_kwargs):
         """
         plot the survival curve for a given group
 
@@ -1531,37 +1235,33 @@ class KMResults(LikelihoodModelResults):
             If true, then the confidence bands will also be plotted.
 
         """
-        survival = self.results[g][0]
-        t = self.ts[g]
-        e = (self.event)[g]
-        if self.censoring is not None:
-            c = self.censorings[g]
-            csurvival = survival[c != 0]
-            ct = t[c != 0]
-            if len(ct) != 0:
-                plt.vlines(ct,csurvival+0.02,csurvival-0.02)
-        t = np.repeat(t[e != 0], 2)
-        s = np.repeat(survival[e != 0], 2)
-        if confidence_band:
-            lower = self.results[g][2]
-            upper = self.results[g][3]
-            lower = np.repeat(lower[e != 0], 2)
-            upper = np.repeat(upper[e != 0], 2)
-        if self.ts[g][-1] in t:
-            t = np.r_[0,t]
-            s = np.r_[1,1,s[:-1]]
-            if confidence_band:
-                lower = np.r_[1,1,lower[:-1]]
-                upper = np.r_[1,1,upper[:-1]]
+
+        if censored is not None:
+            # remove the values that are censored but an event occurs
+            cidx = (censored - np.logical_and(event, censored)).astype(bool)
+            csurvival = survival[cidx]
+            ctime = time[cidx]
+            ax.plot(ctime, csurvival, '+', markersize=15)
+
+        ax.plot(np.r_[0, time], np.r_[1, survival], color='k', **plot_kwargs)
+
+        if confidence_band is not None:
+            lower, upper = confidence_band.T
+            ax.plot(np.r_[0, time], np.r_[1, lower],
+                    linestyle="steps-post--", color='b')
+            ax.plot(np.r_[0, time], np.r_[1, upper],
+                    linestyle="steps-post--", color='b')
+
+    def summary(self):
+        """
+        Print a set of tables containing the estimates of the survival
+        function, and its standard errors
+        """
+        if self.exog is None:
+            self._summary_proc(0)
         else:
-            t = np.r_[0,t,self.ts[g][-1]]
-            s = np.r_[1,1,s]
-            if confidence_band:
-                lower = np.r_[1,1,lower]
-                upper = np.r_[1,1,upper]
-        if confidence_band:
-            plt.plot(t,(np.c_[lower,upper]),'k--')
-        plt.plot(t,s)
+            for g in range(len(self.groups)):
+                self._summary_proc(g)
 
     def _summary_proc(self, g):
         """
@@ -1590,7 +1290,6 @@ class KMResults(LikelihoodModelResults):
         return table
 
 class CoxResults(LikelihoodModelResults):
-
     """
     Results for cox proportional hazard models
 
@@ -1610,12 +1309,29 @@ class CoxResults(LikelihoodModelResults):
         array of names for the exogenous variables
     """
 
-    def __init__(self, model, params, normalized_cov_params=None, scale=1.0,
-                 names=None):
+    def __init__(self, model, params, normalized_cov_params=None, scale=1.0):
         super(CoxResults, self).__init__(model, params, normalized_cov_params,
                                         scale)
-        self.names = names
         self.exog_mean = model.exog_mean
+
+    def cov_params(self, params):
+
+        """
+        Calculate the covariance matrix at estimates of the
+        parameters
+
+        Parameters
+        ----------
+
+        params : estimates of the model parameters
+
+        Returns
+        -------
+
+        covariance matrix as 2d array
+
+        """
+        return np.linalg.pinv(self.model.information(params))
 
     def summary(self):
 
@@ -1625,14 +1341,14 @@ class CoxResults(LikelihoodModelResults):
         """
 
         params = self.params
-        names = self.names
-        coeffs = np.c_[names, self.test_coefficients()]
+        exog_names = self.model.exog_names
+        coeffs = np.c_[exog_names, self.test_coefficients()]
         coeffs = SimpleTable(coeffs, headers=['variable','parameter',
                                               'standard error', 'z-score',
                                               'p-value'],
                              title='Coefficients')
-        CI = np.c_[names, params, np.exp(params), self.conf_int(exp=False),
-                   self.conf_int()]
+        CI = np.c_[exog_names, params, np.exp(params),
+                   self.conf_int(exp=False), self.conf_int()]
         ##Shorten table (two tables?)
         CI = SimpleTable(CI, headers=['variable','parameter','exp(param)',
                                       'lower 95 CI', 'upper 95 CI',
@@ -1649,7 +1365,8 @@ class CoxResults(LikelihoodModelResults):
         print(tests)
         #TODO: make print into return
 
-    def baseline(self, return_times=False):
+    @cache_readonly
+    def baseline(self):
         """
         estimate the baseline survival function
 
@@ -1675,15 +1392,8 @@ class CoxResults(LikelihoodModelResults):
         #TODO: do we need return_times argument?
 
         model = self.model
-        baseline = KaplanMeier(model.surv)
-        baseline = baseline.fit()
-        if return_times:
-            times = baseline.ts[0]
-            baseline = baseline.results[0][0]
-            return np.c_[times, baseline]
-        else:
-            baseline = baseline.results[0][0]
-            return baseline
+        baseline = KaplanMeier(model.surv).fit()
+        return baseline.survival
 
     def predict(self, X, t):
         """
@@ -1743,7 +1453,7 @@ class CoxResults(LikelihoodModelResults):
             If true, then confidence bands for the survival curve are also
             plotted
         coerce_0_1 : bool
-            If true, then the values for the survival curve be coerced to fit 
+            If true, then the values for the survival curve be coerced to fit
             in the interval [0,1]
 
         Notes
@@ -2032,3 +1742,41 @@ class CoxResults(LikelihoodModelResults):
     def scheonfeld_plot(self):
         #TODO: not implemented yet
         pass
+
+if __name__ == "__main__":
+    import pandas
+    #http://stat.ethz.ch/education/semesters/ss2011/seminar/contents/presentation_2.pdf
+    dta = pandas.DataFrame(
+                    [(6, 1, 1), (6, 1, 1), (6, 1, 1), (7, 1, 1), (10, 1, 1),
+                     (13, 1, 1), (16, 1, 1), (22, 1, 1), (23, 1, 1),
+                     (6, 0, 1), (9, 0, 1), (10, 0, 1), (11, 0, 1), (17, 0, 1),
+                     (19, 0, 1), (20, 0, 1), (25, 0, 1), (32, 0, 1),
+                     (32, 0, 1), (34, 0, 1), (35, 0, 1), (1, 1, 2), (1, 1, 2),
+                     (2, 1, 2), (2, 1, 2), (3, 1, 2), (4, 1, 2), (4, 1, 2),
+                     (5, 1, 2), (5, 1, 2), (8, 1, 2), (8, 1, 2), (8, 1, 2),
+                     (8, 1, 2), (11, 1, 2), (11, 1, 2), (12, 1, 2),
+                     (12, 1, 2), (15, 1, 2), (17, 1, 2), (22, 1, 2),
+                     (23, 1, 2)],
+                    columns=["duration", "status", "treatment"])
+
+    #dta = pandas.read_csv("/home/skipper/scratch/remission.csv")
+    surv = Survival("duration", event="status", data=dta)
+
+
+    mod = KaplanMeier(surv, groups=dta["treatment"])
+    res = mod.fit()
+
+    # from lecture handout. times to finish a test in different noise
+    # conditions. test is taken up at 12 minutes no matter what
+    #www-personal.umich.edu/~yili/lect3notes.pdf
+
+    dta2 = pandas.DataFrame([(9,1,1), (9.5,1,1), (9,1,1), (8.5,1,1), (10,1,1),
+                            (10.5,1,1), (10,1,2), (12,1,2), (12,0,2),
+                            (11,1,2), (12,1,2), (10.5,1,2), (12,1,3),
+                            (12,0,3), (12,0,3), (12,0,3),
+                            (12,0,3), (12,0,3)],
+                            columns=["time","event","noise"])
+
+    mod2 = KaplanMeier(Survival("time", event="event", data=dta2),
+            groups=dta2["noise"])
+    res2 = mod2.fit()
