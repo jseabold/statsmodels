@@ -378,6 +378,146 @@ def _make_exog_names(exog):
 
     return exog_names
 
+#### Grouped Data Handling
+
+def _make_group_names(groups):
+    return ['group%d' % i for i in range(1, groups.shape[1]+1)]
+
+def _check_group_in_keys(group_key, all_groups):
+    if group_key in all_groups:
+        return group_key
+    else:
+        raise ValueError("Key %s not found in keys" % group_key)
+
+class GroupedData(ModelData):
+    def __init__(self, endog, exog=None, missing='none', hasconst=None,
+                       groups=None, **kwargs):
+        self.orig_groups = groups
+        super(GroupedData, self).__init__(endog, exog, missing, hasconst,
+                                           groups=groups, **kwargs)
+
+        if groups is not None:
+            self.groups = self._convert_groups(self.groups)
+        else:
+            self.groups = None
+
+    def _convert_groups(self, groups):
+        if groups is None:
+            return
+        groups = self._get_xarr(groups)
+        if groups.ndim == 1:
+            groups = groups[:, None]
+        if groups.ndim != 2:
+            raise ValueError("groups is not 1d or 2d")
+
+        return groups
+
+    @cache_readonly
+    def data_with_groups(self):
+        # cheaper memory-wise to keep them all together in one DF
+        # but not as cheap as just computing them on the fly as
+        # needed...
+        data_dict = dict(zip(self.ynames, self.endog.T))
+        if self.groups is not None:
+            data_dict.update(zip(self.group_names, self.groups.T))
+        exog = self.exog
+        if exog is not None:
+            data_dict.update(zip(self.xnames, exog.T))
+        return DataFrame.from_dict(data_dict)
+
+    def get_group(self, group_key):
+        """
+        Get data for a single group. Returns endog, exog
+        """
+        group_name = _check_group_in_keys(group_key, self.group_keys)
+        data = self.data_with_groups
+        data = data.ix[(data[self.group_names] == group_key).all(1)]
+        if self.exog:
+            return data[self.ynames], data[self.xnames]
+        else:
+            return data[self.ynames], None
+
+    def group_by_groups(self, group_keys=None):
+        """
+        Group the data by the given group_keys. Returns a generator over all
+        the groups that yields (group_key, endog, exog). Default of None
+        returns all the groups. If there are no groups, then group_key = None.
+        """
+        groups = self.groups
+        if groups is None:
+            yield None, self.endog, self.exog
+        elif group_keys is None:
+            grouped_data = self.data_with_groups.groupby(self.group_names)
+            if self.exog is not None:
+                for group_key, group in grouped_data:
+                    yield (group_key,
+                           group[self.ynames].values,
+                           group[self.xnames].values)
+            else:
+                for group_key, group in grouped_data:
+                    yield group_key, group[self.ynames].values, None
+        else:
+            if (not isinstance(group_keys, (list, tuple)) and
+                    isinstance(group_keys, basestring)):
+                group_keys = [group_keys]
+            group_keys = [_check_group_in_keys(key, self.group_keys) for
+                          key in group_keys]
+            grouped_data = self.data_with_groups.groupby(group_names)
+            for group_key, group in grouped_data:
+                if group_key not in group_keys:
+                    continue
+                if self.exog is not None:
+                    yield (group_key,
+                           group[self.ynames].values,
+                           group[self.xnames].values)
+                else:
+                    yield group_key, group[self.ynames].values, None
+
+
+    @cache_readonly
+    def group_keys(self):
+        """
+        All possible groups - combination of factors.
+        """
+        # consider using scipy.stats._support.unique(self.groups)
+        # this seems a little heavy but self.groups is an ndarray
+        group_names = self.group_names
+        grp = DataFrame(self.groups, columns=group_names)
+        return grp.groupby(group_names).grouper.groups.keys()
+
+    @cache_readonly
+    def group_names(self):
+        """
+        The variable names of the group variables.
+        """
+        groups = self.orig_groups
+        if groups is not None:
+            group_names = self._get_names(groups)
+            if not group_names:
+                group_names = _make_group_names(self.groups)
+            return list(group_names)
+        return None
+
+    def attach_groups(self, result):
+        return result
+
+class PandasGroupedData(GroupedData, PandasData):
+    def __init__(self, endog, exog=None, missing='none', hasconst=None,
+                       groups=None, **kwargs):
+        super(PandasGroupedData, self).__init__(endog, exog=exog,
+                                          missing=missing,
+                                          hasconst=hasconst, groups=groups,
+                                          **kwargs)
+
+class PatsyGroupedData(GroupedData, PatsyData):
+    def __init__(self, endog, exog=None, missing='none', hasconst=None,
+                       groups=None, **kwargs):
+        super(PatsyGroupedData, self).__init__(endog, exog=exog,
+                                          missing=missing,
+                                          hasconst=hasconst, groups=groups,
+                                          **kwargs)
+
+
 def handle_data(endog, exog, missing='none', hasconst=None, **kwargs):
     """
     Given inputs
@@ -389,14 +529,26 @@ def handle_data(endog, exog, missing='none', hasconst=None, **kwargs):
         exog = np.asarray(exog)
 
     if data_util._is_using_ndarray_type(endog, exog):
-        klass = ModelData
+        if "groups" in kwargs:
+            klass = GroupedData
+        else:
+            klass = ModelData
     elif data_util._is_using_pandas(endog, exog):
-        klass = PandasData
+        if "groups" in kwargs:
+            klass = PandasGroupedData
+        else:
+            klass = PandasData
     elif data_util._is_using_patsy(endog, exog):
-        klass = PatsyData
+        if "groups" in kwargs:
+            klass = PatsyGroupedData
+        else:
+            klass = PatsyData
     # keep this check last
     elif data_util._is_using_ndarray(endog, exog):
-        klass = ModelData
+        if "groups" in kwargs:
+            klass = GroupedData
+        else:
+            klass = ModelData
     else:
         raise ValueError('unrecognized data structures: %s / %s' %
                          (type(endog), type(exog)))
