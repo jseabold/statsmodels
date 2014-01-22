@@ -190,7 +190,8 @@ class SurvivalModel(Model):
             nrisk = collapsed.apply(cumsum_shift).fillna(0).sum(1)
             collapsed["nrisk"] = group_nobs - nrisk
 
-        collapsed = collapsed.reset_index(inplace=True)
+        #NOTE: older version of pandas are going to return something here...
+        collapsed.reset_index(inplace=True)
         self.collapsed_data = collapsed[ynames].values
         #self.nrisk = collapsecensoredd["nrisk"]
         if group_names:
@@ -204,15 +205,18 @@ class SurvivalModel(Model):
         #to SurvivalData
         # need to repass the data, because Grouping magics are at the
         # ModelData level, missing has already been handled
-        #TODO: I thought types were handled elsewhere
-        if exog is not None:
-            exog = orig_data.exog.astype(float)
+        # by doing this, we're never going to get a PandasGroupedData object
+        #import ipdb; ipdb.set_trace()
+        #super(SurvivalModel, self).__init__(data.endog.astype(float),
+        #                                    data.exog,
+        #                                    groups=data.groups,
+        #                                    missing='none', **kwargs)
 
-        super(SurvivalModel, self).__init__(data.endog.astype(float),
-                                            exog,
-                                            groups=data.groups,
-                                            missing='none', **kwargs)
-
+        #import ipdb; ipdb.set_trace()
+        #TODO: don't attach endog like this
+        self.data = data
+        self.endog = data.endog
+        self.exog = data.exog
         self.time = self.endog[:,0]
         self.event = self.endog[:,1]
         self.censored = self.endog[:,2]
@@ -768,7 +772,6 @@ class CoxPH(SurvivalModel, LikelihoodModel):
         Returns
         -------
         information matrix as 2d array
-
         """
         return -self.hessian(params)
 
