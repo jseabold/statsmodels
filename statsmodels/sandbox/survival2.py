@@ -37,6 +37,7 @@ def _maybe_name_or_idx_data(name, X):
         else:
             raise ValueError("Data of type %s not understood" % type(X))
 
+
 def _maybe_asarray_pandas_passthru(X):
     if X is None:
         return
@@ -47,6 +48,7 @@ def _maybe_asarray_pandas_passthru(X):
             return X
     else:
         return np.asarray(X)
+
 
 def _maybe_event_to_censored(X):
     if X is None:
@@ -147,6 +149,7 @@ class Survival(object):
     def mean(self):
         # hard-coded to act on axis 0
         return np.average(self.time, weights=self.event)
+
 
 class SurvivalModel(Model):
     def __init__(self, surv, exog=None, groups=None, missing='none',
@@ -476,6 +479,7 @@ class KaplanMeier(SurvivalModel):
         results = np.c_[hazard, survival, std_err]
         return KMResults(self, results)
 
+
 def get_td(data, ntd, td, td_times, censoring=None, times=None,
            ntd_names=None, td_name=None):
     """
@@ -557,6 +561,7 @@ def get_td(data, ntd, td, td_times, censoring=None, times=None,
         else:
             return np.c_[start, td_times, ntd, td]
 
+
 def _loglike_breslow_exact(params, exog, times, event_idx, collapsed_data):
     """
     exog, times, and collapsed_data should be for each strata
@@ -572,6 +577,7 @@ def _loglike_breslow_exact(params, exog, times, event_idx, collapsed_data):
         at_risk = times >= time_i
         logL -= sp_logsumexp(fittedvalues[at_risk]) * tied
     return logL
+
 
 def _loglike_efron_exact(params, exog, times, event_idx, collapsed_data):
     fittedvalues = np.dot(exog, params)
@@ -589,10 +595,12 @@ def _loglike_efron_exact(params, exog, times, event_idx, collapsed_data):
                 - np.arange(tied)/tied * np.dot(exp_fittedvalues, ind)))
     return logL
 
+
 _coxph_loglike_funcs = {
                   "efron" : _loglike_efron_exact,
                   "breslow" : _loglike_breslow_exact,
         }
+
 
 def _score_breslow(params, exog, times, event_idx, collapsed_data):
     score = np.sum(exog[event_idx], axis=0)
@@ -606,6 +614,7 @@ def _score_breslow(params, exog, times, event_idx, collapsed_data):
                          np.sum(exp_fittedvalues_j))
 
     return score
+
 
 def _score_efron(params, exog, times, event_idx, collapsed_data):
     fittedvalues = np.dot(exog, params)
@@ -626,8 +635,10 @@ def _score_efron(params, exog, times, event_idx, collapsed_data):
         score -= np.sum((num1 - c * num2) / (de1 - c * de2), axis=0)
     return score
 
+
 _coxph_score_funcs = {"efron" : _score_efron,
                       "breslow" : _score_breslow}
+
 
 def _hessian_efron(params, exog, times, event_idx, collapsed_data):
     params = np.atleast_1d(params) # powell seems to squeeze, messing up dims
@@ -661,6 +672,7 @@ def _hessian_efron(params, exog, times, event_idx, collapsed_data):
     return hess
 #return np.atleast_2d(hess)
 
+
 def _hessian_breslow(params, exog, times, event_idx, collapsed_data):
     params = np.atleast_1d(params) # powell seems to squeeze, messing up dims
     fittedvalues = np.dot(exog, params)
@@ -681,6 +693,7 @@ def _hessian_breslow(params, exog, times, event_idx, collapsed_data):
 _coxph_hessian_funcs = {"efron" : _hessian_efron,
                         "breslow" : _hessian_breslow}
 
+
 def _coxph_group_arguments_factory(model, params):
     """
     Returns a generator that yields the arguments that are necessary
@@ -697,6 +710,7 @@ def _coxph_group_arguments_factory(model, params):
         else:
             collapsed_data = model.collapsed_data
         yield params, exog, times, event_idx, collapsed_data[:,:2]
+
 
 class CoxPH(SurvivalModel, LikelihoodModel):
     """
@@ -810,6 +824,7 @@ class CoxPH(SurvivalModel, LikelihoodModel):
                         maxiter=maxiter, full_output=full_output,
                         disp=disp, callback=callback, retall=retall, **kwargs)
         return CoxResults(self, results.params)
+
 
 def unstack_groups(X, group_keys, group_names, ynames, join_char="_"):
     """
@@ -1292,6 +1307,7 @@ class KMResults(object):
                                 title = myTitle)
         return table
 
+
 class CoxResults(LikelihoodModelResults):
     """
     Results for cox proportional hazard models
@@ -1745,6 +1761,7 @@ class CoxResults(LikelihoodModelResults):
     def scheonfeld_plot(self):
         #TODO: not implemented yet
         pass
+
 
 if __name__ == "__main__":
     import pandas
