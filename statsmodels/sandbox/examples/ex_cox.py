@@ -11,7 +11,8 @@ from scipy import stats
 ##The ovarian_cancer dataset contains data on cancer survival
 ##and gene expression
 dta = ovarian_cancer.load()
-darray = np.asarray(dta['data'])
+surv = dta.endog
+exog = dta.exog
 
 ##darray is a numpy array whose index zero column is a vector
 ##survival times, and whose index one column is a vector of
@@ -21,16 +22,9 @@ darray = np.asarray(dta['data'])
 ##Now, get an array of the exogenous variables. We'll use the
 ##first 4 genes in darray
 
-exog = darray[:,range(2,6)]
-
 ##Fit the model
-##0 is the index in darray of the times, and 1 is the index
-##of the censoring variable
-surv = Survival(0, censoring=1, data=darray)
 ##CoxPH takes a Survival object as input
 cox = CoxPH(surv, exog)
-##cox = CoxPH(surv, range(2,6), data=darray)
-##is equivalent
 results = cox.fit()
 ##results is a CoxResults object
 print "estimated parameters"
