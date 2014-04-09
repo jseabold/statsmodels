@@ -6,7 +6,7 @@ import numpy as np
 from statsmodels.graphics import utils
 from statsmodels.tsa.stattools import acf, pacf
 
-def plot_acf(x, ax=None, lags=None, alpha=.05, use_vlines=True, unbiased=False,
+def acf_plot(x, ax=None, lags=None, alpha=.05, use_vlines=True, unbiased=False,
             fft=False, **kwargs):
     """Plot the autocorrelation function
 
@@ -86,7 +86,13 @@ def plot_acf(x, ax=None, lags=None, alpha=.05, use_vlines=True, unbiased=False,
 
     return fig
 
-def plot_pacf(x, ax=None, lags=None, alpha=.05, method='ywm',
+
+plot_acf = np.deprecate(acf_plot,
+                        old_name='statsmodels.graphics.tsaplots.plot_acf',
+                        new_name='statsmodels.graphics.tsaplots.acf_plot')
+
+
+def pacf_plot(x, ax=None, lags=None, alpha=.05, method='ywm',
                 use_vlines=True, **kwargs):
     """Plot the partial autocorrelation function
 
@@ -171,6 +177,12 @@ def plot_pacf(x, ax=None, lags=None, alpha=.05, method='ywm',
 
     return fig
 
+
+plot_pacf = np.deprecate(pacf_plot,
+                         old_name='statsmodels.graphics.tsaplots.plot_pacf',
+                         new_name='statsmodels.graphics.tsaplots.pacf_plot')
+
+
 def seasonal_plot(grouped_x, xticklabels, ylabel=None, ax=None):
     """
     Consider using one of month_plot or quarter_plot unless you need
@@ -251,6 +263,7 @@ def month_plot(x, dates=None, ylabel=None, ax=None):
     xticklabels = ['j','f','m','a','m','j','j','a','s','o','n','d']
     return seasonal_plot(x.groupby(lambda y : y.month), xticklabels,
                          ylabel=ylabel, ax=ax)
+
 
 def quarter_plot(x, dates=None, ylabel=None, ax=None):
     """
