@@ -950,11 +950,12 @@ def coint(y1, y2, regression="c"):
     return coint_t, pvalue, crit_value
 
 
-def _safe_arma_fit(y, order, model_kw, trend, fit_kw, start_params=None):
+def _safe_arma_fit(y, order, model_kw, trend, fit_kw, exog=None,
+                   start_params=None):
     try:
-        return ARMA(y, order=order, **model_kw).fit(disp=0, trend=trend,
-                                                    start_params=start_params,
-                                                    **fit_kw)
+        return ARMA(y, order=order, exog=exog,
+                    **model_kw).fit(disp=0, trend=trend,
+                                    start_params=start_params, **fit_kw)
     except LinAlgError:
         # SVD convergence failure on badly misspecified models
         return
@@ -969,7 +970,7 @@ def _safe_arma_fit(y, order, model_kw, trend, fit_kw, start_params=None):
             start_params = [.1] * sum(order)
             if trend == 'c':
                 start_params = [.1] + start_params
-            return _safe_arma_fit(y, order, model_kw, trend, fit_kw,
+            return _safe_arma_fit(y, order, model_kw, trend, fit_kw, exog,
                                   start_params)
         else:
             return
@@ -977,8 +978,8 @@ def _safe_arma_fit(y, order, model_kw, trend, fit_kw, start_params=None):
         return
 
 
-def arma_order_select_ic(y, max_ar=4, max_ma=2, ic='bic', trend='c',
-                         model_kw={}, fit_kw={}):
+def arma_order_select_ic(y, max_ar=4, max_ma=2, exog=None, ic='bic',
+                         trend='c', model_kw={}, fit_kw={}):
     """
     Returns information criteria for many ARMA models
 
@@ -1051,7 +1052,7 @@ def arma_order_select_ic(y, max_ar=4, max_ma=2, ic='bic', trend='c',
                 results[:, ar, ma] = np.nan
                 continue
 
-            mod = _safe_arma_fit(y, (ar, ma), model_kw, trend, fit_kw)
+            mod = _safe_arma_fit(y, (ar, ma), model_kw, trend, fit_kw, exog)
             if mod is None:
                 results[:, ar, ma] = np.nan
                 continue
