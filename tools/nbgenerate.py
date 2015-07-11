@@ -82,11 +82,11 @@ class NotebookRunner:
             iopub = kc.sub_channel
         shell = kc.shell_channel
         # make sure it's working
-        shell.execute("pass")
+        shell.send("pass")
         shell.get_msg()
 
         # all of these should be run pylab inline
-        shell.execute("%pylab inline")
+        shell.send("%pylab inline")
         shell.get_msg()
 
         self.kc = kc
@@ -107,7 +107,7 @@ class NotebookRunner:
 
     def run_cell(self, shell, iopub, cell, exec_count):
         outs = []
-        shell.execute(cell.input)
+        shell.send(cell.input)
         # hard-coded timeout, problem?
         shell.get_msg(timeout=90)
         cell.prompt_number = exec_count # msg["content"]["execution_count"]
