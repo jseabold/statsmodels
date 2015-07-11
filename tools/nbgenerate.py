@@ -86,7 +86,7 @@ class NotebookRunner:
         shell.get_msg()
 
         # all of these should be run pylab inline
-        shell.send("%pylab inline")
+        shell.send("%matplotlib inline")
         shell.get_msg()
 
         self.kc = kc
