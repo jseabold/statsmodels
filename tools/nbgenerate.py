@@ -13,6 +13,9 @@ import io
 import sys
 import time
 import shutil
+import platform
+import logging
+from time import sleep
 
 SOURCE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
                                           "examples",
@@ -47,156 +50,204 @@ except ImportError:
 
 import hash_funcs
 
-class NotebookRunner:
-    """
-    Paramters
-    ---------
-    notebook_dir : str
-        Path to the notebooks to convert
-    extra_args : list
-        These are command line arguments passed to start the notebook kernel
-    profile : str
-        The profile name to use
-    timeout : int
-        How many seconds to wait for each sell to complete running
-    """
-    def __init__(self, notebook_dir, extra_args=None, profile=None,
-                 timeout=90):
-        self.notebook_dir = os.path.abspath(notebook_dir)
-        self.profile = profile
-        self.timeout = timeout
-        km = KernelManager()
-        if extra_args is None:
-            extra_args = []
-        if profile is not None:
-            extra_args += ["--profile=%s" % profile]
-        km.start_kernel(stderr=open(os.devnull, 'w'),
-                        extra_arguments=extra_args)
+
+class NotebookRunner(object):
+    # The kernel communicates with mime-types while the notebook
+    # uses short labels for different cell types. We'll use this to
+    # map from kernel types to notebook format types.
+
+    MIME_MAP = {
+        'image/jpeg': 'jpeg',
+        'image/png': 'png',
+        'text/plain': 'text',
+        'text/html': 'html',
+        'text/latex': 'latex',
+        'application/javascript': 'html',
+        'image/svg+xml': 'svg',
+    }
+
+
+    def __init__(self, nb, pylab=False, mpl_inline=False, profile_dir=None, working_dir=None):
+        self.km = KernelManager()
+
+        args = []
+
+        if pylab:
+            args.append('--pylab=inline')
+            logging.warn('--pylab is deprecated and will be removed in a future version')
+        elif mpl_inline:
+            args.append('--matplotlib=inline')
+            logging.warn('--matplotlib is deprecated and will be removed in a future version')
+
+        if profile_dir:
+            args.append('--profile-dir=%s' % os.path.abspath(profile_dir))
+
+        cwd = os.getcwd()
+
+        if working_dir:
+            os.chdir(working_dir)
+
+        self.km.start_kernel(extra_arguments = args)
+
+        os.chdir(cwd)
+
+        if platform.system() == 'Darwin':
+            # There is sometimes a race condition where the first
+            # execute command hits the kernel before it's ready.
+            # It appears to happen only on Darwin (Mac OS) and an
+            # easy (but clumsy) way to mitigate it is to sleep
+            # for a second.
+            sleep(1)
+
+        self.kc = self.km.client()
+        self.kc.start_channels()
         try:
-            kc = km.client()
-            kc.start_channels()
-            iopub = kc.iopub_channel
-        except AttributeError: # still on 0.13
-            kc = km
-            kc.start_channels()
-            iopub = kc.sub_channel
-        shell = kc.shell_channel
-        # make sure it's working
-        shell.send("pass")
-        shell.get_msg()
+            self.kc.wait_for_ready()
+        except AttributeError:
+            # IPython < 3
+            self._wait_for_ready_backport()
 
-        # all of these should be run pylab inline
-        shell.send("%matplotlib inline")
-        shell.get_msg()
+        self.nb = nb
 
-        self.kc = kc
-        self.km = km
-        self.iopub = iopub
 
-    def __iter__(self):
-        notebooks = [os.path.join(self.notebook_dir, i)
-                     for i in os.listdir(self.notebook_dir)
-                     if i.endswith('.ipynb') and 'generated' not in i]
-        for ipynb in notebooks:
-            with open(ipynb, 'r') as f:
-                nb = reads(f.read(), 'json')
-            yield ipynb, nb
+    def shutdown_kernel(self):
+        logging.info('Shutdown kernel')
+        self.kc.stop_channels()
+        self.km.shutdown_kernel(now=True)
 
-    def __call__(self, nb):
-        return self.run_notebook(nb)
+    def _wait_for_ready_backport(self):
+        """Backport BlockingKernelClient.wait_for_ready from IPython 3"""
+        # Wait for kernel info reply on shell channel
+        self.kc.kernel_info()
+        while True:
+            msg = self.kc.get_shell_msg(block=True, timeout=30)
+            if msg['msg_type'] == 'kernel_info_reply':
+                break
 
-    def run_cell(self, shell, iopub, cell, exec_count):
-        outs = []
-        shell.send(cell.input)
-        # hard-coded timeout, problem?
-        shell.get_msg(timeout=90)
-        cell.prompt_number = exec_count # msg["content"]["execution_count"]
-
+        # Flush IOPub channel
         while True:
             try:
-                # whats the assumption on timeout here?
-                # is it asynchronous?
-                msg = iopub.get_msg(timeout=.2)
+                msg = self.kc.get_iopub_msg(block=True, timeout=0.2)
             except Empty:
                 break
-            msg_type = msg["msg_type"]
-            if msg_type in ["status" , "pyin"]:
-                continue
-            elif msg_type == "clear_output":
-                outs = []
-                continue
 
-            content = msg["content"]
+    def run_cell(self, cell):
+        '''
+        Run a notebook cell and update the output of that cell in-place.
+        '''
+        logging.info('Running cell:\n%s\n', cell.input)
+        self.kc.execute(cell.input)
+        reply = self.kc.get_shell_msg()
+        status = reply['content']['status']
+        if status == 'error':
+            traceback_text = 'Cell raised uncaught exception: \n' + \
+                '\n'.join(reply['content']['traceback'])
+            logging.info(traceback_text)
+        else:
+            logging.info('Cell returned')
+
+        outs = list()
+        while True:
+            try:
+                msg = self.kc.get_iopub_msg(timeout=1)
+                if msg['msg_type'] == 'status':
+                    if msg['content']['execution_state'] == 'idle':
+                        break
+            except Empty:
+                # execution state should return to idle before the queue becomes empty,
+                # if it doesn't, something bad has happened
+                raise
+
+            content = msg['content']
+            msg_type = msg['msg_type']
+
+            # IPython 3.0.0-dev writes pyerr/pyout in the notebook format but uses
+            # error/execute_result in the message spec. This does the translation
+            # needed for tests to pass with IPython 3.0.0-dev
+            notebook3_format_conversions = {
+                'error': 'pyerr',
+                'execute_result': 'pyout'
+            }
+            msg_type = notebook3_format_conversions.get(msg_type, msg_type)
+
             out = NotebookNode(output_type=msg_type)
 
-            if msg_type == "stream":
-                out.stream = content["name"]
-                out.text = content["data"]
-            elif msg_type in ["display_data", "pyout"]:
-                for mime, data in content["data"].iteritems():
-                    attr = mime.split("/")[-1].lower()
-                    # this gets most right, but fix svg+html, plain
-                    attr = attr.replace('+xml', '').replace('plain', 'text')
+            if 'execution_count' in content:
+                cell['prompt_number'] = content['execution_count']
+                out.prompt_number = content['execution_count']
+
+            if msg_type in ('status', 'pyin', 'execute_input'):
+                continue
+            elif msg_type == 'stream':
+                out.stream = content['name']
+                # in msgspec 5, this is name, text
+                # in msgspec 4, this is name, data
+                if 'text' in content:
+                    out.text = content['text']
+                else:
+                    out.text = content['data']
+                #print(out.text, end='')
+            elif msg_type in ('display_data', 'pyout'):
+                for mime, data in content['data'].items():
+                    try:
+                        attr = self.MIME_MAP[mime]
+                    except KeyError:
+                        raise NotImplementedError('unhandled mime type: %s' % mime)
+
                     setattr(out, attr, data)
-                if msg_type == "pyout":
-                    out.prompt_number = exec_count #content["execution_count"]
-            elif msg_type == "pyerr":
-                out.ename = content["ename"]
-                out.evalue = content["evalue"]
-                out.traceback = content["traceback"]
+                #print(data, end='')
+            elif msg_type == 'pyerr':
+                out.ename = content['ename']
+                out.evalue = content['evalue']
+                out.traceback = content['traceback']
+
+                #logging.error('\n'.join(content['traceback']))
+            elif msg_type == 'clear_output':
+                outs = list()
+                continue
             else:
-                print("unhandled iopub msg:", msg_type)
-
+                raise NotImplementedError('unhandled iopub message: %s' % msg_type)
             outs.append(out)
+        cell['outputs'] = outs
 
-        return outs
+        if status == 'error':
+            raise NotebookError(traceback_text)
 
-    def run_notebook(self, nb):
-        """
-        """
-        shell = self.kc.shell_channel
-        iopub = self.iopub
-        cells = 0
-        errors = 0
-        cell_errors = 0
-        exec_count = 1
 
-        #TODO: What are the worksheets? -ss
-        for ws in nb.worksheets:
+    def iter_code_cells(self):
+        '''
+        Iterate over the notebook cells containing code.
+        '''
+        for ws in self.nb.worksheets:
             for cell in ws.cells:
-                if cell.cell_type != 'code':
-                    # there won't be any output
-                    continue
-                cells += 1
-                try:
-                    # attaches the output to cell inplace
-                    outs = self.run_cell(shell, iopub, cell, exec_count)
-                    if outs and outs[-1]['output_type'] == 'pyerr':
-                        cell_errors += 1
-                    exec_count += 1
-                except Exception as e:
-                    print("failed to run cell:", repr(e))
-                    print(cell.input)
-                    errors += 1
-                    continue
-                cell.outputs = outs
+                if cell.cell_type == 'code':
+                    yield cell
 
-        print("ran notebook %s" % nb.metadata.name)
-        print("    ran %3i cells" % cells)
-        if errors:
-            print("    %3i cells raised exceptions" % errors)
-        else:
-            print("    there were no errors in run_cell")
-        if cell_errors:
-            print("    %3i cells have exceptions in their output"
-                  % cell_errors)
-        else:
-            print("    all code executed in the notebook as expected")
 
-    def __del__(self):
-        self.kc.stop_channels()
-        self.km.shutdown_kernel()
-        del self.km
+    def run_notebook(self, skip_exceptions=False, progress_callback=None):
+        '''
+        Run all the cells of a notebook in order and update
+        the outputs in-place.
+
+        If ``skip_exceptions`` is set, then if exceptions occur in a cell, the
+        subsequent cells are run (by default, the notebook execution stops).
+        '''
+        for i, cell in enumerate(self.iter_code_cells()):
+            try:
+                self.run_cell(cell)
+            except NotebookError:
+                if not skip_exceptions:
+                    raise
+            if progress_callback:
+                progress_callback(i)
+
+
+    def count_code_cells(self):
+        '''
+        Return the number of code cells in the notebook
+        '''
+        return sum(1 for _ in self.iter_code_cells())
+
 
 def _get_parser():
     try:
