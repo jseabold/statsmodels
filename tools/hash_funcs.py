@@ -7,36 +7,47 @@ from statsmodels.compat import cPickle
 
 file_path = os.path.dirname(__file__)
 
+try:
+    io_errors = (IOError, FileNotFoundError)
+except:
+    io_errors = IOError,
+
+
 def get_hash(f):
     """
     Gets hexadmecimal md5 hash of a string
     """
     import hashlib
     m = hashlib.md5()
-    m.update(f)
+    try:
+        m.update(f)
+    except TypeError:  # Python 3 needs an encode to bytes
+        m.update(f.encode('ascii'))
     return m.hexdigest()
+
 
 def update_hash_dict(filehash, filename):
     """
     Opens the pickled hash dictionary, adds an entry, and dumps it back.
     """
     try:
-        with open(file_path+'/hash_dict.pickle','r') as f:
+        with open(file_path+'/hash_dict.pickle', 'rb') as f:
             hash_dict = cPickle.load(f)
-    except IOError as err:
+    except io_errors:
         hash_dict = {}
     hash_dict.update({filename : filehash})
-    with open(os.path.join(file_path,'hash_dict.pickle'),'w') as f:
+    with open(os.path.join(file_path, 'hash_dict.pickle'), 'wb') as f:
         cPickle.dump(hash_dict, f)
+
 
 def check_hash(rawfile, filename):
     """
     Returns True if hash does not match the previous one.
     """
     try:
-        with open(file_path+'/hash_dict.pickle','r') as f:
+        with open(file_path+'/hash_dict.pickle', 'rb') as f:
             hash_dict = cPickle.load(f)
-    except IOError as err:
+    except IOError:
         hash_dict = {}
     try:
         checkhash = hash_dict[filename]
