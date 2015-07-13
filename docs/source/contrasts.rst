@@ -5,7 +5,7 @@ Patsy: Contrast Coding Systems for categorical variables
 
 .. note:: This document is based heavily on `this excellent resource from UCLA <http://www.ats.ucla.edu/stat/r/library/contrast_coding.htm>`__.
 
-A categorical variable of K categories, or levels, usually enters a regression as a sequence of K-1 dummy variables. This amounts to a linear hypothesis on the level means. That is, each test statistic for these variables amounts to testing whether the mean for that level is statistically significantly different from the mean of the base category. This dummy coding is called Treatment coding in R parlance, and we will follow this convention. There are, however, different coding methods that amount to different sets of linear hypotheses. 
+A categorical variable of K categories, or levels, usually enters a regression as a sequence of K-1 dummy variables. This amounts to a linear hypothesis on the level means. That is, each test statistic for these variables amounts to testing whether the mean for that level is statistically significantly different from the mean of the base category. This dummy coding is called Treatment coding in R parlance, and we will follow this convention. There are, however, different coding methods that amount to different sets of linear hypotheses.
 
 In fact, the dummy coding is not technically a contrast coding. This is because the dummy variables add to one and are not functionally independent of the model's intercept. On the other hand, a set of *contrasts* for a categorical variable with `k` levels is a set of `k-1` functionally independent linear combinations of the factor level means that are also independent of the sum of the dummy variables. The dummy coding isn't wrong *per se*. It captures all of the coefficients, but it complicates matters when the model assumes independence of the coefficients such as in ANOVA. Linear regression models do not assume independence of the coefficients and thus dummy coding is often the only coding that is taught in this context.
 
@@ -13,7 +13,7 @@ To have a look at the contrast matrices in Patsy, we will use data from UCLA ATS
 
 .. ipython:: python
    :suppress:
-   
+
    import numpy as np
    np.set_printoptions(precision=4, suppress=True)
 
@@ -42,9 +42,9 @@ Example Data
 
 .. ipython:: python
 
-   import pandas
+   import pandas as pd
    url = 'http://www.ats.ucla.edu/stat/data/hsb2.csv'
-   hsb2 = pandas.read_table(url, delimiter=",")
+   hsb2 = pd.read_table(url, delimiter=",")
 
 It will be instructive to look at the mean of the dependent variable, write, for each level of race ((1 = Hispanic, 2 = Asian, 3 = African American and 4 = Caucasian)).
 
@@ -171,7 +171,7 @@ As you can see, these are only equal up to a constant. Other versions of the Hel
    k = 3
    1./k * (grouped.mean()["write"][k] - grouped.mean()["write"][:k-1].mean())
 
-   
+
 Orthogonal Polynomial Coding
 ----------------------------
 
