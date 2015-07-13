@@ -326,3 +326,6 @@ github_project_url = "https://github.com/statsmodels/statsmodels"
 import json
 example_context = json.load(open('examples/landing.json'))
 html_context = {'examples': example_context }
+
+
+numpydoc_show_class_members = False
