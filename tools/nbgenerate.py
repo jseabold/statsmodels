@@ -340,6 +340,3 @@ if __name__ == '__main__':
 
     finally:
         os.chdir(cur_dir)
-
-    # probably not necessary
-    del notebook_runner
