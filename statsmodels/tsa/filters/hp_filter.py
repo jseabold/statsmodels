@@ -37,14 +37,12 @@ def hpfilter(X, lamb=1600):
     >>> dta.set_index(index, inplace=True)
 
     >>> cycle, trend = sm.tsa.filters.hpfilter(dta.realgdp, 1600)
-    >>> gdp_decomp = dta[['realgdp']]
-    >>> gdp_decomp["cycle"] = cycle
-    >>> gdp_decomp["trend"] = trend
+    >>> dta["cycle"] = cycle
+    >>> dta["trend"] = trend
 
     >>> import matplotlib.pyplot as plt
     >>> fig, ax = plt.subplots()
-    >>> gdp_decomp[["realgdp", "trend"]]["2000-03-31":].plot(ax=ax,
-    ...                                                      fontsize=16);
+    >>> dta.ix["2003-03-31":, ["realgdp", "trend"]].plot(ax=ax, fontsize=16);
     >>> plt.show()
 
     .. plot:: plots/hpf_plot.py
