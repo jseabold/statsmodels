@@ -9,7 +9,7 @@ import pandas
 mdata = ds.macrodata.load_pandas().data
 
 # prepare the dates index
-dates = mdata[['year', 'quarter']].astype(int).astype('S4')
+dates = mdata[['year', 'quarter']].astype(int).astype(str)
 quarterly = dates["year"] + "Q" + dates["quarter"]
 quarterly = dates_from_str(quarterly)
 
