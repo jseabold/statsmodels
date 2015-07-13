@@ -105,7 +105,7 @@ local level model can be specified and estimated:
    # Fit the model with maximum likelihood estimation
    mod = LocalLevel(data['volume'])
    res = mod.fit()
-   print res.summary()
+   print(res.summary())
 
 The documentation and example notebooks provide further examples of how to
 formulating state space models. Included in this release is a full-fledged
@@ -144,7 +144,7 @@ effects.
    mod = sm.tsa.SARIMAX(endog, exog=exog, order=(1,1,1),
                         trend='t', seasonal_order=(0,0,1,4))
    res = mod.fit()
-   print res.summary()
+   print(res.summary())
 
 Other important new features
 ----------------------------

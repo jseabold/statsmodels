@@ -40,8 +40,8 @@ extensions = ['sphinx.ext.autodoc', 'sphinx.ext.doctest',
 
 import sphinx
 if sphinx.__version__ == '1.1.3':
-    print ("WARNING: Not building inheritance diagrams on sphinx 1.1.3. "
-           "See https://github.com/statsmodels/statsmodels/issues/1002")
+    print("WARNING: Not building inheritance diagrams on sphinx 1.1.3. "
+          "See https://github.com/statsmodels/statsmodels/issues/1002")
     extensions.remove('sphinx.ext.inheritance_diagram')
 
 # plot_directive is broken on old matplotlib
@@ -136,7 +136,7 @@ pygments_style = 'sphinx'
 if 'htmlhelp' in sys.argv:
     #html_theme = 'statsmodels_htmlhelp'  #doesn't look nice yet
     html_theme = 'default'
-    print '################# using statsmodels_htmlhelp ############'
+    print('################# using statsmodels_htmlhelp ############')
 else:
     html_theme = 'statsmodels'
 

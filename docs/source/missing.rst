@@ -17,7 +17,7 @@ All of the models can handle missing data. For performance reasons, the default 
    >>> data.endog[missing_idx] = np.nan
    >>> ols_model = sm.OLS(data.endog, data.exog)
    >>> ols_fit = ols_model.fit()
-   >>> print ols_fit.params
+   >>> print(ols_fit.params)
    [ nan  nan  nan  nan  nan  nan  nan]
 
 This silently fails and all of the model parameters are NaN, which is probably not what you expected. If you are not sure whether or not you have missing data you can use `missing = 'raise'`. This will raise a `MissingDataError` during model instantiation if missing data is present so that you know something was wrong in your input data.
@@ -37,4 +37,4 @@ We are considering adding a configuration framework so that you can set the opti
 Implementation Details
 ----------------------
 
-Internally, this function uses `pandas.isnull <pandas:http://pandas.pydata.org/pandas-docs/stable/missing_data.html#working-with-missing-data>`_. Anything that returns True from this function will be treated as missing data. 
+Internally, this function uses `pandas.isnull <pandas:http://pandas.pydata.org/pandas-docs/stable/missing_data.html#working-with-missing-data>`_. Anything that returns True from this function will be treated as missing data.
