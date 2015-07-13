@@ -331,7 +331,8 @@ arma2ma = arma_impulse_response
 
 #alias, easier to remember
 def arma2ar(ar, ma, nobs=100):
-    '''get the AR representation of an ARMA process
+    """
+    Get the AR representation of an ARMA process
 
     Parameters
     ----------
@@ -346,20 +347,14 @@ def arma2ar(ar, ma, nobs=100):
     -------
     ar : array, 1d
         coefficients of AR lag polynomial with nobs elements
-    `
 
     Notes
     -----
     This is just an alias for
 
     ``ar_representation = arma_impulse_response(ma, ar, nobs=100)``
-
-    fully tested against matlab
-
-    Examples
-    --------
-
-    '''
+    """
+    # tested against matlab
     return arma_impulse_response(ma, ar, nobs=nobs)
 
 

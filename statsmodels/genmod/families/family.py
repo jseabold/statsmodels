@@ -217,9 +217,9 @@ class Family(object):
 
         Parameters
         ----------
-        `endog` : array
+        endog : array
             Usually the endogenous response variable.
-        `mu` : array
+        mu : array
             Usually but not always the fitted mean response variable.
         scale : float
             The scale parameter
@@ -228,11 +228,12 @@ class Family(object):
         -------
         llf : float
             The value of the loglikelihood evaluated at (endog,mu).
+
         Notes
         -----
         This is defined for each family.  endog and mu are not restricted to
         `endog` and `mu` respectively.  For instance, the deviance function
-        calls both loglike(endog,endog) and loglike(endog,mu) to get the
+        calls both loglike(endog, endog) and loglike(endog,mu) to get the
         likelihood ratio.
         """
         raise NotImplementedError
