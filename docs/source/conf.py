@@ -313,7 +313,9 @@ intersphinx_mapping = {
         'python' : ('http://docs.python.org/3.2', None),
         'pydagogue' : ('http://matthew-brett.github.io/pydagogue/', None),
         'patsy' : ('http://patsy.readthedocs.org/en/latest/', None),
-        'pandas' : ('http://pandas.pydata.org/pandas-docs/dev/', None),
+        'pandas' : (('https://pandas-docs.github.io/'
+                     'pandas-docs-travis/objects.inv'),
+                    None),
         }
 
 from os.path import dirname, abspath, join
