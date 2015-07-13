@@ -21,7 +21,7 @@ def get_hash(f):
     m = hashlib.md5()
     try:
         m.update(f)
-    except TypeError:  # Python 3 needs an encode to bytes
+    except (TypeError, UnicodeEncodeError):  # Python 3 needs an encode to bytes
         m.update(f.encode('ascii'))
     return m.hexdigest()
 
