@@ -22,7 +22,7 @@ def get_hash(f):
     try:
         m.update(f)
     except (TypeError, UnicodeEncodeError):  # Python 3 needs an encode to bytes
-        m.update(f.encode('ascii'))
+        m.update(f.encode('utf-8'))
     return m.hexdigest()
 
 
