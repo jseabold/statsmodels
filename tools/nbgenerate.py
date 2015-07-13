@@ -143,7 +143,7 @@ class NotebookRunner(object):
         outs = list()
         while True:
             try:
-                msg = self.kc.get_iopub_msg(timeout=1)
+                msg = self.kc.get_iopub_msg(timeout=90)
                 if msg['msg_type'] == 'status':
                     if msg['content']['execution_state'] == 'idle':
                         break
@@ -304,7 +304,7 @@ if __name__ == '__main__':
                                              mpl_inline=True)
 
             # This edits the notebook cells inplace
-            notebook_runner.run_notebook()
+            notebook_runner.run_notebook(skip_exceptions=True)
 
             # use nbconvert to convert to rst
             support_file_dir = os.path.join(rst_target_dir,
