@@ -14,6 +14,8 @@ Author: Padarn Wilson
 import statsmodels.api as sm
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
+pd.set_option("mode.chained_assignment", None)
 
 data = sm.datasets.statecrime.load_pandas().data
 murder = data['murder']
