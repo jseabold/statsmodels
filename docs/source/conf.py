@@ -313,8 +313,7 @@ intersphinx_mapping = {
         'python' : ('http://docs.python.org/3.2', None),
         'pydagogue' : ('http://matthew-brett.github.io/pydagogue/', None),
         'patsy' : ('http://patsy.readthedocs.org/en/latest/', None),
-        'pandas' : (('https://pandas-docs.github.io/'
-                     'pandas-docs-travis/objects.inv'),
+        'pandas' : (('https://pandas-docs.github.io/pandas-docs-travis/'),
                     None),
         }
 
@@ -331,3 +330,11 @@ html_context = {'examples': example_context }
 
 
 numpydoc_show_class_members = False
+
+import pandas as pd
+pd.set_option("mode.chained_assignment", "raise")
+
+import warnings
+warnings.filterwarnings("ignore",
+                        "This call to matplotlib.use() has no effect",
+                        UserWarning)
