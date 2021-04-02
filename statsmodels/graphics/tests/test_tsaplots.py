@@ -2,6 +2,7 @@ from statsmodels.compat.python import lmap
 
 import calendar
 from io import BytesIO
+import locale
 
 import numpy as np
 from numpy.testing import assert_, assert_equal
@@ -212,13 +213,15 @@ def test_plot_month(close_figures):
     fig = month_plot(dta)
 
     # test localized xlabels
-    with calendar.different_locale("DE_de"):
-        fig = month_plot(dta)
-        labels = [_.get_text() for _ in fig.axes[0].get_xticklabels()]
-        expected = ['Jan', 'Feb', 'Mär', 'Apr', 'Mai', 'Jun', 'Jul',
-                    'Aug', 'Sep', 'Okt', 'Nov', 'Dez']
-        for x, y in zip(labels, expected):
-            assert x == y
+    if "de_de" in locale.locale_alias:
+        # installed locales are machine dependent
+        with calendar.different_locale("de_DE"):
+            fig = month_plot(dta)
+            labels = [_.get_text() for _ in fig.axes[0].get_xticklabels()]
+            expected = ['Jan', 'Feb', 'Mär', 'Apr', 'Mai', 'Jun', 'Jul',
+                        'Aug', 'Sep', 'Okt', 'Nov', 'Dez']
+            for x, y in zip(labels, expected):
+                assert x == y
 
 
 @pytest.mark.matplotlib
