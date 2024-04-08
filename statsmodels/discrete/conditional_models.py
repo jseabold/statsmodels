@@ -125,6 +125,8 @@ class _ConditionalModel(base.LikelihoodModel):
         crslt = ConditionalResults(self, rslt.params, rslt.cov_params(), 1)
         crslt.method = method
         crslt.nobs = self.nobs
+        crslt.mle_settings = rslt.mle_settings
+        crslt.mle_retvalues = rslt.mle_retvals
         crslt.n_groups = self._n_groups
         crslt._group_stats = [
             "%d" % min(self._groupsize),
