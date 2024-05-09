@@ -14,19 +14,12 @@ jobs:
 - job: ${{ parameters.name }}Test
   pool:
     vmImage: ${{ parameters.vmImage }}
-  strategy:
-    matrix:
-      ${{ if eq(parameters.name, 'macOS') }}:
-        python311_macos_latest:
-          python.version: '3.11'
-    maxParallel: 1
-
   steps:
   - task: UsePythonVersion@0
     inputs:
-      versionSpec: '$(python.version)'
+      versionSpec: '3.11'
       architecture: 'x64'
-    displayName: 'Use Python $(python.version)'
+    displayName: 'Use Python 3.11'
 
   - bash: |
       echo "##vso[task.prependpath]$CONDA/bin"
@@ -110,7 +103,7 @@ jobs:
   - task: PublishTestResults@2
     inputs:
       testResultsFiles: '**/test-results.xml'
-      testRunTitle: 'Python $(python.version)'
+      testRunTitle: 'Python 3.11'
     condition: succeededOrFailed()
 
   - task: PublishCodeCoverageResults@1
