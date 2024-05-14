@@ -1,6 +1,7 @@
 # build
 cython>=0.29.33,<4.0.0
 setuptools_scm[toml]~=8.0
+pandas<2.1
 oldest-supported-numpy>=2022.4.18
 
 # run
